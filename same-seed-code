@@ -1,0 +1,164 @@
+Here are two separate implementations of PyTorch and CUDA code, both using the same random seed (`SEED = 42`) to ensure reproducibility. 
+
+---
+
+### **PyTorch Code**
+```python
+import torch
+import numpy as np
+import random
+
+# Set the seed for reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)  # For multi-GPU systems
+
+# Optional for reproducibility in certain PyTorch operations
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+# Define a simple neural network
+class TinyModel(torch.nn.Module):
+    def __init__(self):
+        super(TinyModel, self).__init__()
+        self.linear1 = torch.nn.Linear(10000, 20000, dtype=torch.float16, device='cuda:0')
+        self.activation = torch.nn.ReLU()
+        self.linear2 = torch.nn.Linear(20000, 10, dtype=torch.float16, device='cuda:0')
+        self.softmax = torch.nn.Softmax(dim=0)
+
+    def forward(self, x):
+        x = self.linear1(x)
+        x = self.activation(x)
+        x = self.linear2(x)
+        x = self.softmax(x)
+        return x
+
+# Instantiate the model
+model = TinyModel()
+
+# Generate random input
+input_data = torch.rand(10000, dtype=torch.float16, device='cuda:0')
+
+# Perform forward pass
+with torch.no_grad():
+    output = model(input_data)
+
+print("PyTorch Output:", output)
+```
+
+---
+
+### **CUDA Code**
+```cpp
+#include <iostream>
+#include <curand_kernel.h>
+#include <cuda_runtime.h>
+
+#define SEED 42  // Same seed as PyTorch
+#define INPUT_DIM 10000
+#define HIDDEN_DIM 20000
+#define OUTPUT_DIM 10
+#define THREADS 256
+
+__global__ void initialize_random(float* array, int size, curandState* states) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        curandState state = states[idx];
+        array[idx] = curand_uniform(&state);  // Random values [0, 1)
+    }
+}
+
+__global__ void setup_random_states(curandState* states, unsigned long seed, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        curand_init(seed, idx, 0, &states[idx]);
+    }
+}
+
+__global__ void forward_pass(
+    float* input, float* linear1_weights, float* linear1_bias,
+    float* linear2_weights, float* linear2_bias, float* output) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < HIDDEN_DIM) {
+        float sum = 0.0f;
+        for (int i = 0; i < INPUT_DIM; ++i) {
+            sum += input[i] * linear1_weights[i * HIDDEN_DIM + idx];
+        }
+        sum += linear1_bias[idx];
+        sum = max(0.0f, sum);  // ReLU activation
+        output[idx] = sum;
+    }
+    __syncthreads();
+
+    if (idx < OUTPUT_DIM) {
+        float sum = 0.0f;
+        for (int i = 0; i < HIDDEN_DIM; ++i) {
+            sum += output[i] * linear2_weights[i * OUTPUT_DIM + idx];
+        }
+        sum += linear2_bias[idx];
+        output[idx] = exp(sum);  // Softmax numerator
+    }
+}
+
+int main() {
+    // Allocate memory
+    float *input, *linear1_weights, *linear1_bias, *linear2_weights, *linear2_bias, *output;
+    cudaMallocManaged(&input, INPUT_DIM * sizeof(float));
+    cudaMallocManaged(&linear1_weights, INPUT_DIM * HIDDEN_DIM * sizeof(float));
+    cudaMallocManaged(&linear1_bias, HIDDEN_DIM * sizeof(float));
+    cudaMallocManaged(&linear2_weights, HIDDEN_DIM * OUTPUT_DIM * sizeof(float));
+    cudaMallocManaged(&linear2_bias, OUTPUT_DIM * sizeof(float));
+    cudaMallocManaged(&output, OUTPUT_DIM * sizeof(float));
+
+    // Setup random states
+    curandState* devStates;
+    cudaMalloc(&devStates, INPUT_DIM * sizeof(curandState));
+    setup_random_states<<<(INPUT_DIM + THREADS - 1) / THREADS, THREADS>>>(devStates, SEED, INPUT_DIM);
+    cudaDeviceSynchronize();
+
+    // Initialize random values
+    initialize_random<<<(INPUT_DIM + THREADS - 1) / THREADS, THREADS>>>(input, INPUT_DIM, devStates);
+    initialize_random<<<(INPUT_DIM * HIDDEN_DIM + THREADS - 1) / THREADS, THREADS>>>(linear1_weights, INPUT_DIM * HIDDEN_DIM, devStates);
+    initialize_random<<<(HIDDEN_DIM + THREADS - 1) / THREADS, THREADS>>>(linear1_bias, HIDDEN_DIM, devStates);
+    initialize_random<<<(HIDDEN_DIM * OUTPUT_DIM + THREADS - 1) / THREADS, THREADS>>>(linear2_weights, HIDDEN_DIM * OUTPUT_DIM, devStates);
+    initialize_random<<<(OUTPUT_DIM + THREADS - 1) / THREADS, THREADS>>>(linear2_bias, OUTPUT_DIM, devStates);
+    cudaDeviceSynchronize();
+
+    // Forward pass
+    forward_pass<<<(HIDDEN_DIM + THREADS - 1) / THREADS, THREADS>>>(
+        input, linear1_weights, linear1_bias, linear2_weights, linear2_bias, output);
+    cudaDeviceSynchronize();
+
+    // Print output
+    std::cout << "CUDA Output: ";
+    for (int i = 0; i < OUTPUT_DIM; ++i) {
+        std::cout << output[i] << " ";
+    }
+    std::cout << std::endl;
+
+    // Free memory
+    cudaFree(input);
+    cudaFree(linear1_weights);
+    cudaFree(linear1_bias);
+    cudaFree(linear2_weights);
+    cudaFree(linear2_bias);
+    cudaFree(output);
+    cudaFree(devStates);
+
+    return 0;
+}
+```
+
+---
+
+### Explanation:
+- Both PyTorch and CUDA code set the random seed to `42` for consistency.
+- The PyTorch code uses built-in functions to generate random weights and biases.
+- The CUDA code uses `curand` to generate random weights, biases, and inputs, and explicitly sets the seed using `curand_init`.
+
+### Output:
+The outputs of both implementations should be similar (but not identical due to precision differences).
