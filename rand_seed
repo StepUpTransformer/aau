@@ -1,66 +1,78 @@
 To use the same seed in both CUDA and PyTorch code, you need to set the random seed in both environments explicitly. Here's how to achieve it:
 
-Setting the Seed in CUDA Code
-In CUDA, you can use curand or rand() for random number generation. To ensure reproducibility, set the seed explicitly.
+---
 
-Using curand: If your CUDA code uses curand for random number generation, set the seed like this:
+### **Setting the Seed in CUDA Code**
+In CUDA, you can use `curand` or `rand()` for random number generation. To ensure reproducibility, set the seed explicitly.
 
-cpp
-Copy code
-#include <curand_kernel.h>
+1. **Using `curand`**:
+   If your CUDA code uses `curand` for random number generation, set the seed like this:
 
-__global__ void setup_kernel(curandState* state, unsigned long seed) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    curand_init(seed, idx, 0, &state[idx]);
-}
-In your main function, call this setup kernel with a fixed seed:
+   ```cpp
+   #include <curand_kernel.h>
 
-cpp
-Copy code
-curandState* devStates;
-cudaMalloc(&devStates, sizeof(curandState) * numThreads);
-setup_kernel<<<numBlocks, blockSize>>>(devStates, 42); // Fixed seed
-Using rand(): If your CUDA code uses rand():
+   __global__ void setup_kernel(curandState* state, unsigned long seed) {
+       int idx = blockIdx.x * blockDim.x + threadIdx.x;
+       curand_init(seed, idx, 0, &state[idx]);
+   }
+   ```
 
-cpp
-Copy code
-srand(42); // Set the seed for reproducibility
-Setting the Seed in PyTorch
+   In your `main` function, call this setup kernel with a fixed seed:
+   ```cpp
+   curandState* devStates;
+   cudaMalloc(&devStates, sizeof(curandState) * numThreads);
+   setup_kernel<<<numBlocks, blockSize>>>(devStates, 42); // Fixed seed
+   ```
+
+2. **Using `rand()`**:
+   If your CUDA code uses `rand()`:
+   ```cpp
+   srand(42); // Set the seed for reproducibility
+   ```
+
+---
+
+### **Setting the Seed in PyTorch**
 PyTorch provides straightforward functions to set random seeds for CPU and GPU:
 
-Set the Seed for CPU and CUDA:
-python
-Copy code
-import torch
-import random
-import numpy as np
+1. **Set the Seed for CPU and CUDA**:
+   ```python
+   import torch
+   import random
+   import numpy as np
 
-SEED = 42  # Use the same seed as CUDA code
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-torch.cuda.manual_seed(SEED)
-torch.cuda.manual_seed_all(SEED)  # If using multi-GPU
+   SEED = 42  # Use the same seed as CUDA code
+   random.seed(SEED)
+   np.random.seed(SEED)
+   torch.manual_seed(SEED)
+   torch.cuda.manual_seed(SEED)
+   torch.cuda.manual_seed_all(SEED)  # If using multi-GPU
 
-# Ensure deterministic behavior (optional)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-Syncing Seeds Between PyTorch and CUDA Code
+   # Ensure deterministic behavior (optional)
+   torch.backends.cudnn.deterministic = True
+   torch.backends.cudnn.benchmark = False
+   ```
+
+---
+
+### **Syncing Seeds Between PyTorch and CUDA Code**
 If you're using both PyTorch and CUDA code in the same project, ensure the same seed is passed to both environments:
 
-Define a constant seed in a shared configuration:
+1. Define a constant seed in a shared configuration:
+   ```python
+   SEED = 42
+   ```
 
-python
-Copy code
-SEED = 42
-Pass it to both the PyTorch script and the CUDA kernel during execution:
+2. Pass it to both the PyTorch script and the CUDA kernel during execution:
+   - For PyTorch, use `torch.manual_seed(SEED)` as shown above.
+   - For CUDA, use the `SEED` constant in `curand_init()` or `srand()`.
 
-For PyTorch, use torch.manual_seed(SEED) as shown above.
-For CUDA, use the SEED constant in curand_init() or srand().
-Full Workflow Example
-PyTorch Code:
-python
-Copy code
+---
+
+### **Full Workflow Example**
+
+#### PyTorch Code:
+```python
 import torch
 
 SEED = 42
@@ -71,9 +83,10 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
 input = torch.rand(10000, device='cuda:0', dtype=torch.float16)
-CUDA Code:
-cpp
-Copy code
+```
+
+#### CUDA Code:
+```cpp
 #include <curand_kernel.h>
 
 __global__ void setup_kernel(curandState* state, unsigned long seed) {
@@ -91,11 +104,6 @@ int main() {
     // Continue with CUDA computations...
     return 0;
 }
+```
+
 By ensuring the same seed is used, you will achieve reproducible results between PyTorch and your custom CUDA code.
-
-
-
-
-
-
-
