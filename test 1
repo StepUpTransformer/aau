@@ -141,3 +141,150 @@ int main() {
 
     return 0;
 }
+
+
+
+#include <iostream>
+#include <cuda_runtime.h>
+#include <curand_kernel.h>
+#include <cuda_fp16.h>  // For 16-bit floating point support
+
+#define INPUT_SIZE 100
+#define HIDDEN_SIZE 200
+#define OUTPUT_SIZE 100
+
+// CUDA kernel for the MLP forward pass with half-precision floating point (FP16)
+__global__ void forward_pass(half *input, half *hidden, half *output,
+                              half *W1, half *b1, half *W2, half *b2,
+                              int input_size, int hidden_size, int output_size) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+    // Hidden layer computation: input * W1 + b1
+    if (idx < hidden_size) {
+        half sum = __float2half(0.0f);
+        for (int i = 0; i < input_size; ++i) {
+            sum = __hadd(sum, __hmul(input[i], W1[i * hidden_size + idx]));
+        }
+        hidden[idx] = __h_tanh(__hadd(sum, b1[idx]));  // Apply activation function (tanh)
+    }
+
+    __syncthreads();
+
+    // Output layer computation: hidden * W2 + b2
+    if (idx < output_size) {
+        half sum = __float2half(0.0f);
+        for (int i = 0; i < hidden_size; ++i) {
+            sum = __hadd(sum, __hmul(hidden[i], W2[i * output_size + idx]));
+        }
+        output[idx] = __hadd(sum, b2[idx]);
+    }
+}
+
+// CUDA kernel for softmax activation function with FP16
+__global__ void softmax(half *output, half *softmax_out, int output_size) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < output_size) {
+        half max_val = output[0];
+        for (int i = 1; i < output_size; ++i) {
+            max_val = __hgt(output[i], max_val) ? output[i] : max_val;
+        }
+
+        half sum_exp = __float2half(0.0f);
+        for (int i = 0; i < output_size; ++i) {
+            sum_exp = __hadd(sum_exp, __hexp(output[i] - max_val));
+        }
+
+        softmax_out[idx] = __hdiv(__hexp(output[idx] - max_val), sum_exp);
+    }
+}
+
+int main() {
+    half *input, *hidden, *output;
+    half *W1, *b1, *W2, *b2;
+    half *d_input, *d_hidden, *d_output, *d_W1, *d_b1, *d_W2, *d_b2, *d_softmax_out;
+
+    // Allocate memory for input, hidden layer, and output
+    input = new half[INPUT_SIZE];
+    hidden = new half[HIDDEN_SIZE];
+    output = new half[OUTPUT_SIZE];
+
+    // Allocate memory for weights and biases
+    W1 = new half[INPUT_SIZE * HIDDEN_SIZE];
+    b1 = new half[HIDDEN_SIZE];
+    W2 = new half[HIDDEN_SIZE * OUTPUT_SIZE];
+    b2 = new half[OUTPUT_SIZE];
+
+    // Initialize input, weights, and biases with random values
+    for (int i = 0; i < INPUT_SIZE; ++i) {
+        input[i] = __float2half(rand() / (float)RAND_MAX);
+    }
+
+    for (int i = 0; i < HIDDEN_SIZE; ++i) {
+        b1[i] = __float2half(rand() / (float)RAND_MAX);
+        for (int j = 0; j < INPUT_SIZE; ++j) {
+            W1[i * INPUT_SIZE + j] = __float2half(rand() / (float)RAND_MAX);
+        }
+    }
+
+    for (int i = 0; i < OUTPUT_SIZE; ++i) {
+        b2[i] = __float2half(rand() / (float)RAND_MAX);
+        for (int j = 0; j < HIDDEN_SIZE; ++j) {
+            W2[i * HIDDEN_SIZE + j] = __float2half(rand() / (float)RAND_MAX);
+        }
+    }
+
+    // Allocate memory on the device
+    cudaMalloc((void**)&d_input, INPUT_SIZE * sizeof(half));
+    cudaMalloc((void**)&d_hidden, HIDDEN_SIZE * sizeof(half));
+    cudaMalloc((void**)&d_output, OUTPUT_SIZE * sizeof(half));
+    cudaMalloc((void**)&d_W1, INPUT_SIZE * HIDDEN_SIZE * sizeof(half));
+    cudaMalloc((void**)&d_b1, HIDDEN_SIZE * sizeof(half));
+    cudaMalloc((void**)&d_W2, HIDDEN_SIZE * OUTPUT_SIZE * sizeof(half));
+    cudaMalloc((void**)&d_b2, OUTPUT_SIZE * sizeof(half));
+    cudaMalloc((void**)&d_softmax_out, OUTPUT_SIZE * sizeof(half));
+
+    // Copy data to the device
+    cudaMemcpy(d_input, input, INPUT_SIZE * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_W1, W1, INPUT_SIZE * HIDDEN_SIZE * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b1, b1, HIDDEN_SIZE * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_W2, W2, HIDDEN_SIZE * OUTPUT_SIZE * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b2, b2, OUTPUT_SIZE * sizeof(half), cudaMemcpyHostToDevice);
+
+    // Launch kernel for forward pass
+    forward_pass<<<(HIDDEN_SIZE + 255) / 256, 256>>>(d_input, d_hidden, d_output,
+                                                     d_W1, d_b1, d_W2, d_b2,
+                                                     INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE);
+
+    // Launch kernel for softmax
+    softmax<<<(OUTPUT_SIZE + 255) / 256, 256>>>(d_output, d_softmax_out, OUTPUT_SIZE);
+
+    // Copy the result back to the host
+    cudaMemcpy(output, d_softmax_out, OUTPUT_SIZE * sizeof(half), cudaMemcpyDeviceToHost);
+
+    // Print the softmax output
+    std::cout << "Softmax Output:" << std::endl;
+    for (int i = 0; i < OUTPUT_SIZE; ++i) {
+        std::cout << __half2float(output[i]) << " ";
+    }
+    std::cout << std::endl;
+
+    // Free memory
+    delete[] input;
+    delete[] hidden;
+    delete[] output;
+    delete[] W1;
+    delete[] b1;
+    delete[] W2;
+    delete[] b2;
+
+    cudaFree(d_input);
+    cudaFree(d_hidden);
+    cudaFree(d_output);
+    cudaFree(d_W1);
+    cudaFree(d_b1);
+    cudaFree(d_W2);
+    cudaFree(d_b2);
+    cudaFree(d_softmax_out);
+
+    return 0;
+}
