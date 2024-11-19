@@ -381,3 +381,82 @@ class TinyModel(torch.nn.Module):
 
 # Example usage
 model = TinyModel()
+
+
+
+#include <iostream>
+#include <cstdlib>
+#include <ctime>
+
+#define N 1024  // Matrix dimensions, modify as needed
+#define TILE_SIZE 32  // Tile size for optimization
+
+// Kernel to multiply matrices A and B, and store the result in C
+__global__ void matMulKernel(float *A, float *B, float *C, int N) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    float sum = 0.0f;
+
+    if (row < N && col < N) {
+        for (int i = 0; i < N; i++) {
+            sum += A[row * N + i] * B[i * N + col];
+        }
+        C[row * N + col] = sum;
+    }
+}
+
+void randomMatrix(float *matrix, int size) {
+    for (int i = 0; i < size; i++) {
+        matrix[i] = static_cast<float>(rand()) / RAND_MAX; // Random values between 0 and 1
+    }
+}
+
+int main() {
+    srand(time(0));
+
+    float *A, *B, *C;  // Matrices
+    float *d_A, *d_B, *d_C;  // Device matrices
+
+    // Allocate memory for host matrices
+    A = (float*)malloc(N * N * sizeof(float));
+    B = (float*)malloc(N * N * sizeof(float));
+    C = (float*)malloc(N * N * sizeof(float));
+
+    // Generate random matrices A and B
+    randomMatrix(A, N * N);
+    randomMatrix(B, N * N);
+
+    // Allocate memory for device matrices
+    cudaMalloc((void**)&d_A, N * N * sizeof(float));
+    cudaMalloc((void**)&d_B, N * N * sizeof(float));
+    cudaMalloc((void**)&d_C, N * N * sizeof(float));
+
+    // Copy matrices A and B to device memory
+    cudaMemcpy(d_A, A, N * N * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, B, N * N * sizeof(float), cudaMemcpyHostToDevice);
+
+    // Launch kernel to multiply matrices
+    dim3 blockDim(TILE_SIZE, TILE_SIZE);
+    dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (N + TILE_SIZE - 1) / TILE_SIZE);
+    matMulKernel<<<gridDim, blockDim>>>(d_A, d_B, d_C, N);
+
+    // Copy result matrix C back to host
+    cudaMemcpy(C, d_C, N * N * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Check for errors
+    cudaDeviceSynchronize();
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(error) << std::endl;
+    }
+
+    // Free memory
+    free(A);
+    free(B);
+    free(C);
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+
+    return 0;
+}
