@@ -350,3 +350,34 @@ output = model(input_tensor)
 # Print the softmax output (probabilities)
 print("Softmax Output:")
 print(output)
+
+
+import torch
+
+class TinyModel(torch.nn.Module):
+    def __init__(self):
+        super(TinyModel, self).__init__()
+        
+        # Define layers
+        self.linear1 = torch.nn.Linear(10000, 20000, dtype=torch.float16, device='cuda:0')
+        self.activation = torch.nn.ReLU()
+        self.linear2 = torch.nn.Linear(20000, 10, dtype=torch.float16, device='cuda:0')
+        self.softmax = torch.nn.Softmax(dim=0)
+        
+        # Initialize weights and biases
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        # Custom weight initialization
+        with torch.no_grad():
+            for layer in [self.linear1, self.linear2]:
+                # For each layer, initialize the weights and biases
+                for i in range(layer.weight.size(0)):  # Iterate over rows
+                    for j in range(layer.weight.size(1)):  # Iterate over columns
+                        # Set weights using the formula (row * column * 0.001) + 0.01
+                        layer.weight[i, j] = (i * j * 0.001) + 0.01
+                # Set biases to 0.005
+                layer.bias.fill_(0.005)
+
+# Example usage
+model = TinyModel()
