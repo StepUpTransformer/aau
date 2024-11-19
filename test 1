@@ -1,0 +1,127 @@
+#include <cuda_runtime.h>
+#include <iostream>
+#include <curand_kernel.h>
+#include <cmath>
+
+#define THREADS_PER_BLOCK 256
+
+__global__ void initialize_random(float* input, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        // Initialize random values
+        curandState state;
+        curand_init(1234, idx, 0, &state);
+        input[idx] = curand_uniform(&state);
+    }
+}
+
+__global__ void linear_forward(const float* input, float* output, const float* weights, const float* bias, int in_features, int out_features) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < out_features) {
+        float sum = 0.0f;
+        for (int col = 0; col < in_features; ++col) {
+            sum += input[col] * weights[row * in_features + col];
+        }
+        output[row] = sum + bias[row];
+    }
+}
+
+__global__ void relu_activation(float* input, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        input[idx] = fmaxf(0.0f, input[idx]);
+    }
+}
+
+__global__ void softmax_activation(float* input, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ float max_val;
+    __shared__ float sum_val;
+
+    if (idx == 0) {
+        max_val = -FLT_MAX;
+        for (int i = 0; i < size; ++i) {
+            max_val = fmaxf(max_val, input[i]);
+        }
+    }
+    __syncthreads();
+
+    if (idx < size) {
+        input[idx] = expf(input[idx] - max_val);
+    }
+    __syncthreads();
+
+    if (idx == 0) {
+        sum_val = 0.0f;
+        for (int i = 0; i < size; ++i) {
+            sum_val += input[i];
+        }
+    }
+    __syncthreads();
+
+    if (idx < size) {
+        input[idx] /= sum_val;
+    }
+}
+
+int main() {
+    const int input_size = 10000;
+    const int linear1_in = 100;
+    const int linear1_out = 200;
+    const int linear2_out = 10;
+
+    // Allocate and initialize input
+    float* d_input;
+    cudaMalloc(&d_input, input_size * sizeof(float));
+    initialize_random<<<(input_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, THREADS_PER_BLOCK>>>(d_input, input_size);
+
+    // Linear 1
+    float* d_linear1_weights;
+    float* d_linear1_bias;
+    float* d_linear1_output;
+    cudaMalloc(&d_linear1_weights, linear1_in * linear1_out * sizeof(float));
+    cudaMalloc(&d_linear1_bias, linear1_out * sizeof(float));
+    cudaMalloc(&d_linear1_output, linear1_out * sizeof(float));
+    // Assume weights and bias are initialized (not shown here for brevity)
+
+    linear_forward<<<(linear1_out + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, THREADS_PER_BLOCK>>>(d_input, d_linear1_output, d_linear1_weights, d_linear1_bias, linear1_in, linear1_out);
+
+    // ReLU activation
+    relu_activation<<<(linear1_out + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, THREADS_PER_BLOCK>>>(d_linear1_output, linear1_out);
+
+    // Linear 2
+    float* d_linear2_weights;
+    float* d_linear2_bias;
+    float* d_linear2_output;
+    cudaMalloc(&d_linear2_weights, linear1_out * linear2_out * sizeof(float));
+    cudaMalloc(&d_linear2_bias, linear2_out * sizeof(float));
+    cudaMalloc(&d_linear2_output, linear2_out * sizeof(float));
+    // Assume weights and bias are initialized (not shown here for brevity)
+
+    linear_forward<<<(linear2_out + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK, THREADS_PER_BLOCK>>>(d_linear1_output, d_linear2_output, d_linear2_weights, d_linear2_bias, linear1_out, linear2_out);
+
+    // Softmax activation
+    softmax_activation<<<1, THREADS_PER_BLOCK>>>(d_linear2_output, linear2_out);
+
+    // Retrieve output
+    float* h_output = new float[linear2_out];
+    cudaMemcpy(h_output, d_linear2_output, linear2_out * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Print output
+    for (int i = 0; i < linear2_out; ++i) {
+        std::cout << h_output[i] << " ";
+    }
+    std::cout << std::endl;
+
+    // Cleanup
+    cudaFree(d_input);
+    cudaFree(d_linear1_weights);
+    cudaFree(d_linear1_bias);
+    cudaFree(d_linear1_output);
+    cudaFree(d_linear2_weights);
+    cudaFree(d_linear2_bias);
+    cudaFree(d_linear2_output);
+    delete[] h_output;
+
+    return 0;
+}
