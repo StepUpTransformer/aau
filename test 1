@@ -125,3 +125,99 @@ int main() {
 
     return 0;
 }
+
+
+#include <iostream>
+#include <cmath>
+#include <cuda_runtime.h>
+
+#define CHECK_CUDA_ERROR(call) {                                \
+    cudaError_t err = call;                                     \
+    if (err != cudaSuccess) {                                    \
+        std::cerr << "CUDA error: " << cudaGetErrorString(err)    \
+                  << " in " << __FILE__ << " at line " << __LINE__ << std::endl; \
+        exit(EXIT_FAILURE);                                      \
+    }                                                            \
+}
+
+__global__ void relu_kernel(float16 *input, float16 *output, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        output[idx] = (input[idx] > 0) ? input[idx] : 0;
+    }
+}
+
+__global__ void softmax_kernel(float16 *input, float16 *output, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float sum = 0;
+        for (int i = 0; i < size; ++i) {
+            sum += expf(input[i]);
+        }
+        output[idx] = expf(input[idx]) / sum;
+    }
+}
+
+void tiny_model_forward(float16 *input, float16 *output, int input_size, int hidden_size, int output_size) {
+    float16 *d_input, *d_output, *d_linear1, *d_linear2, *d_activation;
+    
+    // Allocate device memory
+    CHECK_CUDA_ERROR(cudaMalloc(&d_input, input_size * sizeof(float16)));
+    CHECK_CUDA_ERROR(cudaMalloc(&d_output, output_size * sizeof(float16)));
+    CHECK_CUDA_ERROR(cudaMalloc(&d_linear1, input_size * hidden_size * sizeof(float16)));  // Linear 1 weights
+    CHECK_CUDA_ERROR(cudaMalloc(&d_linear2, hidden_size * output_size * sizeof(float16))); // Linear 2 weights
+    CHECK_CUDA_ERROR(cudaMalloc(&d_activation, hidden_size * sizeof(float16)));  // Activation output
+
+    // Copy input to device
+    CHECK_CUDA_ERROR(cudaMemcpy(d_input, input, input_size * sizeof(float16), cudaMemcpyHostToDevice));
+
+    // Linear layer 1 (input -> hidden)
+    // Simplified version: manual matrix multiplication would be done here
+
+    // ReLU activation
+    relu_kernel<<<(input_size + 255) / 256, 256>>>(d_input, d_activation, input_size);
+
+    // Linear layer 2 (hidden -> output)
+    // Simplified version: manual matrix multiplication would be done here
+
+    // Softmax
+    softmax_kernel<<<(output_size + 255) / 256, 256>>>(d_activation, d_output, output_size);
+
+    // Copy output back to host
+    CHECK_CUDA_ERROR(cudaMemcpy(output, d_output, output_size * sizeof(float16), cudaMemcpyDeviceToHost));
+
+    // Free device memory
+    cudaFree(d_input);
+    cudaFree(d_output);
+    cudaFree(d_linear1);
+    cudaFree(d_linear2);
+    cudaFree(d_activation);
+}
+
+int main() {
+    int input_size = 100;
+    int hidden_size = 200;
+    int output_size = 10;
+
+    // Host input data
+    float16 *input = new float16[input_size];
+    for (int i = 0; i < input_size; ++i) {
+        input[i] = static_cast<float16>(rand() % 10); // Random values for input
+    }
+
+    // Host output data
+    float16 *output = new float16[output_size];
+
+    // Call the model forward pass
+    tiny_model_forward(input, output, input_size, hidden_size, output_size);
+
+    // Print output
+    for (int i = 0; i < output_size; ++i) {
+        std::cout << "Output[" << i << "] = " << output[i] << std::endl;
+    }
+
+    delete[] input;
+    delete[] output;
+
+    return 0;
+}
