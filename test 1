@@ -312,3 +312,41 @@ __global__ void softmax(half *output, half *softmax_out, int output_size) {
         softmax_out[idx] = __hdiv(__float2half(__half2float(output[idx]) - __half2float(max_val)), sum_exp);
     }
 }
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# Define the MLP class
+class MLP(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(MLP, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)  # Input to hidden layer
+        self.fc2 = nn.Linear(hidden_size, output_size)  # Hidden to output layer
+
+    def forward(self, x):
+        x = torch.tanh(self.fc1(x))  # Hidden layer with tanh activation
+        x = self.fc2(x)  # Output layer (raw scores)
+        return F.softmax(x, dim=1)  # Apply softmax to get probabilities
+
+# Set random seed for reproducibility
+torch.manual_seed(42)
+
+# Initialize the model with the desired sizes
+input_size = 100
+hidden_size = 200
+output_size = 100
+
+# Create a random input tensor
+input_tensor = torch.rand(input_size)
+
+# Instantiate the MLP model
+model = MLP(input_size, hidden_size, output_size)
+
+# Perform a forward pass
+output = model(input_tensor)
+
+# Print the softmax output (probabilities)
+print("Softmax Output:")
+print(output)
