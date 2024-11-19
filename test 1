@@ -288,3 +288,27 @@ int main() {
 
     return 0;
 }
+
+
+
+__global__ void softmax(half *output, half *softmax_out, int output_size) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < output_size) {
+        // Find the maximum value to stabilize the softmax calculation
+        half max_val = output[0];
+        for (int i = 1; i < output_size; ++i) {
+            max_val = __hgt(output[i], max_val) ? output[i] : max_val;
+        }
+
+        // Compute the sum of exponentials
+        half sum_exp = __float2half(0.0f);
+        for (int i = 0; i < output_size; ++i) {
+            // Convert from half to float, compute exp, then convert back to half
+            float exp_val = expf(__half2float(output[i]) - __half2float(max_val));
+            sum_exp = __hadd(sum_exp, __float2half(exp_val));
+        }
+
+        // Compute softmax output
+        softmax_out[idx] = __hdiv(__float2half(__half2float(output[idx]) - __half2float(max_val)), sum_exp);
+    }
+}
