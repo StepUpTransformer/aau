@@ -43,3 +43,16 @@ print("FC2 Biases:\n", model.fc2.bias)
 input_data = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
 output = model(input_data)
 print("Output:\n", output)
+
+
+import torch
+
+# Dimensions
+rows, cols = 100, 200
+
+# Generate weights matrix using broadcasting
+i_indices = torch.arange(rows).unsqueeze(1)  # Column vector of row indices
+j_indices = torch.arange(cols).unsqueeze(0)  # Row vector of column indices
+weights_matrix = 0.0001 * i_indices * j_indices
+
+print(weights_matrix)
