@@ -1,58 +1,141 @@
-import torch
-import torch.nn as nn
+#include <cuda_runtime.h>
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <cstdlib>
 
-# Define a simple MLP
-class MLP(nn.Module):
-    def __init__(self):
-        super(MLP, self).__init__()
-        self.fc1 = nn.Linear(4, 3)  # Input: 4 features, Output: 3 features
-        self.fc2 = nn.Linear(3, 2)  # Input: 3 features, Output: 2 features
+#define BLOCK_SIZE 256
 
-    def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+// CUDA Kernel for matrix-vector multiplication with bias
+__global__ void matVecMulBias(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {
+        float sum = bias[row];
+        for (int col = 0; col < cols; ++col) {
+            sum += mat[row * cols + col] * vec[col];
+        }
+        output[row] = sum;
+    }
+}
 
-# Instantiate the model
-model = MLP()
+// CUDA Kernel for Tanh activation
+__global__ void applyTanh(float* data, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        data[idx] = tanhf(data[idx]);
+    }
+}
 
-# Predefined weights and biases for each layer
-predefined_weights_fc1 = torch.tensor([[0.1, 0.2, 0.3, 0.4],
-                                       [0.5, 0.6, 0.7, 0.8],
-                                       [0.9, 1.0, 1.1, 1.2]])
-predefined_biases_fc1 = torch.tensor([0.1, 0.2, 0.3])
+// CUDA Kernel for Softmax
+__global__ void softmax(float* data, int size) {
+    __shared__ float sum;
+    __shared__ float max_val;
 
-predefined_weights_fc2 = torch.tensor([[0.1, 0.2, 0.3],
-                                       [0.4, 0.5, 0.6]])
-predefined_biases_fc2 = torch.tensor([0.4, 0.5])
+    int idx = threadIdx.x;
+    float thread_max = -FLT_MAX;
+    float thread_sum = 0.0f;
 
-# Assign the predefined weights and biases
-with torch.no_grad():  # Disable gradient tracking while modifying weights
-    model.fc1.weight.copy_(predefined_weights_fc1)
-    model.fc1.bias.copy_(predefined_biases_fc1)
-    model.fc2.weight.copy_(predefined_weights_fc2)
-    model.fc2.bias.copy_(predefined_biases_fc2)
+    // Find max value
+    for (int i = idx; i < size; i += blockDim.x) {
+        thread_max = fmaxf(thread_max, data[i]);
+    }
 
-# Verify the assignment
-print("FC1 Weights:\n", model.fc1.weight)
-print("FC1 Biases:\n", model.fc1.bias)
-print("FC2 Weights:\n", model.fc2.weight)
-print("FC2 Biases:\n", model.fc2.bias)
+    if (idx == 0) max_val = thread_max;
+    __syncthreads();
 
-# Test the model with some input
-input_data = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
-output = model(input_data)
-print("Output:\n", output)
+    // Exponential and sum
+    for (int i = idx; i < size; i += blockDim.x) {
+        data[i] = expf(data[i] - max_val);
+        thread_sum += data[i];
+    }
 
+    if (idx == 0) sum = thread_sum;
+    __syncthreads();
 
-import torch
+    // Normalize
+    for (int i = idx; i < size; i += blockDim.x) {
+        data[i] /= sum;
+    }
+}
 
-# Dimensions
-rows, cols = 100, 200
+// Initialize weights and biases
+void initializeWeights(float* data, int size) {
+    for (int i = 0; i < size; ++i) {
+        data[i] = static_cast<float>(rand()) / RAND_MAX;
+    }
+}
 
-# Generate weights matrix using broadcasting
-i_indices = torch.arange(rows).unsqueeze(1)  # Column vector of row indices
-j_indices = torch.arange(cols).unsqueeze(0)  # Row vector of column indices
-weights_matrix = 0.0001 * i_indices * j_indices
+int main() {
+    // Model dimensions
+    const int input_size = 100;
+    const int hidden_size = 200;
+    const int output_size = 10;
 
-print(weights_matrix)
+    // Allocate host memory
+    std::vector<float> h_input(input_size);
+    std::vector<float> h_hidden(hidden_size);
+    std::vector<float> h_output(output_size);
+
+    std::vector<float> h_linear1_weights(input_size * hidden_size);
+    std::vector<float> h_linear1_bias(hidden_size);
+    std::vector<float> h_linear2_weights(hidden_size * output_size);
+    std::vector<float> h_linear2_bias(output_size);
+
+    // Initialize weights and biases
+    initializeWeights(h_linear1_weights.data(), input_size * hidden_size);
+    initializeWeights(h_linear1_bias.data(), hidden_size);
+    initializeWeights(h_linear2_weights.data(), hidden_size * output_size);
+    initializeWeights(h_linear2_bias.data(), output_size);
+    initializeWeights(h_input.data(), input_size);
+
+    // Allocate device memory
+    float *d_input, *d_hidden, *d_output;
+    float *d_linear1_weights, *d_linear1_bias;
+    float *d_linear2_weights, *d_linear2_bias;
+
+    cudaMalloc(&d_input, input_size * sizeof(float));
+    cudaMalloc(&d_hidden, hidden_size * sizeof(float));
+    cudaMalloc(&d_output, output_size * sizeof(float));
+
+    cudaMalloc(&d_linear1_weights, input_size * hidden_size * sizeof(float));
+    cudaMalloc(&d_linear1_bias, hidden_size * sizeof(float));
+    cudaMalloc(&d_linear2_weights, hidden_size * output_size * sizeof(float));
+    cudaMalloc(&d_linear2_bias, output_size * sizeof(float));
+
+    // Copy data to device
+    cudaMemcpy(d_input, h_input.data(), input_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_linear1_weights, h_linear1_weights.data(), input_size * hidden_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_linear1_bias, h_linear1_bias.data(), hidden_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_linear2_weights, h_linear2_weights.data(), hidden_size * output_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_linear2_bias, h_linear2_bias.data(), output_size * sizeof(float), cudaMemcpyHostToDevice);
+
+    // Launch kernels
+    int numBlocksHidden = (hidden_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int numBlocksOutput = (output_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    matVecMulBias<<<numBlocksHidden, BLOCK_SIZE>>>(d_linear1_weights, d_input, d_linear1_bias, d_hidden, hidden_size, input_size);
+    applyTanh<<<numBlocksHidden, BLOCK_SIZE>>>(d_hidden, hidden_size);
+
+    matVecMulBias<<<numBlocksOutput, BLOCK_SIZE>>>(d_linear2_weights, d_hidden, d_linear2_bias, d_output, output_size, hidden_size);
+    softmax<<<1, BLOCK_SIZE>>>(d_output, output_size);
+
+    // Copy results back to host
+    cudaMemcpy(h_output.data(), d_output, output_size * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Print output
+    for (const auto& val : h_output) {
+        std::cout << val << " ";
+    }
+    std::cout << std::endl;
+
+    // Free device memory
+    cudaFree(d_input);
+    cudaFree(d_hidden);
+    cudaFree(d_output);
+    cudaFree(d_linear1_weights);
+    cudaFree(d_linear1_bias);
+    cudaFree(d_linear2_weights);
+    cudaFree(d_linear2_bias);
+
+    return 0;
+}
