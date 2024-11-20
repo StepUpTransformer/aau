@@ -1,0 +1,153 @@
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cmath>
+
+#define BLOCK_SIZE 256
+
+// CUDA Kernel for matrix-vector multiplication with bias
+__global__ void matVecMulBias(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {
+        float sum = bias[row];
+        for (int col = 0; col < cols; ++col) {
+            sum += mat[row * cols + col] * vec[col];
+        }
+        output[row] = sum;
+    }
+}
+
+// CUDA Kernel for Tanh activation
+__global__ void applyTanh(float* data, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        data[idx] = tanhf(data[idx]);
+    }
+}
+
+// CUDA Kernel for Softmax
+__global__ void softmax(float* data, int size) {
+    __shared__ float sum;
+    __shared__ float max_val;
+
+    int idx = threadIdx.x;
+    float thread_max = -FLT_MAX;
+    float thread_sum = 0.0f;
+
+    // Find max value
+    for (int i = idx; i < size; i += blockDim.x) {
+        thread_max = fmaxf(thread_max, data[i]);
+    }
+
+    if (idx == 0) max_val = thread_max;
+    __syncthreads();
+
+    // Exponential and sum
+    for (int i = idx; i < size; i += blockDim.x) {
+        data[i] = expf(data[i] - max_val);
+        thread_sum += data[i];
+    }
+
+    if (idx == 0) sum = thread_sum;
+    __syncthreads();
+
+    // Normalize
+    for (int i = idx; i < size; i += blockDim.x) {
+        data[i] /= sum;
+    }
+}
+
+// Initialize input, weights, and biases
+void initializeData(float* input, float* W1, float* b1, float* W2, float* b2, int input_size, int hidden_size, int output_size) {
+    for (int i = 0; i < input_size; ++i) {
+        input[i] = 0.0001 * i + 0.001;
+    }
+
+    for (int i = 0; i < hidden_size; ++i) {
+        b1[i] = 0.0005;
+        for (int j = 0; j < input_size; ++j) {
+            W1[i * input_size + j] = 0.0001 * i * j;
+        }
+    }
+
+    for (int i = 0; i < output_size; ++i) {
+        b2[i] = 0.0005;
+        for (int j = 0; j < hidden_size; ++j) {
+            W2[i * hidden_size + j] = 0.0001 * i * j;
+        }
+    }
+}
+
+int main() {
+    // Model dimensions
+    const int input_size = 100;
+    const int hidden_size = 200;
+    const int output_size = 10;
+
+    // Allocate host memory
+    float *h_input = new float[input_size];
+    float *h_hidden = new float[hidden_size];
+    float *h_output = new float[output_size];
+
+    float *h_linear1_weights = new float[input_size * hidden_size];
+    float *h_linear1_bias = new float[hidden_size];
+    float *h_linear2_weights = new float[hidden_size * output_size];
+    float *h_linear2_bias = new float[output_size];
+
+    // Initialize data using the given formula
+    initializeData(h_input, h_linear1_weights, h_linear1_bias, h_linear2_weights, h_linear2_bias, input_size, hidden_size, output_size);
+
+    // Allocate device memory
+    float *d_input, *d_hidden, *d_output;
+    float *d_linear1_weights, *d_linear1_bias;
+    float *d_linear2_weights, *d_linear2_bias;
+
+    cudaMalloc(&d_input, input_size * sizeof(float));
+    cudaMalloc(&d_hidden, hidden_size * sizeof(float));
+    cudaMalloc(&d_output, output_size * sizeof(float));
+
+    cudaMalloc(&d_linear1_weights, input_size * hidden_size * sizeof(float));
+    cudaMalloc(&d_linear1_bias, hidden_size * sizeof(float));
+    cudaMalloc(&d_linear2_weights, hidden_size * output_size * sizeof(float));
+    cudaMalloc(&d_linear2_bias, output_size * sizeof(float));
+
+    // Copy data to device
+    cudaMemcpy(d_input, h_input, input_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_linear1_weights, h_linear1_weights, input_size * hidden_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_linear1_bias, h_linear1_bias, hidden_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_linear2_weights, h_linear2_weights, hidden_size * output_size * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_linear2_bias, h_linear2_bias, output_size * sizeof(float), cudaMemcpyHostToDevice);
+
+    // Launch kernels
+    int numBlocksHidden = (hidden_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int numBlocksOutput = (output_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    matVecMulBias<<<numBlocksHidden, BLOCK_SIZE>>>(d_linear1_weights, d_input, d_linear1_bias, d_hidden, hidden_size, input_size);
+    applyTanh<<<numBlocksHidden, BLOCK_SIZE>>>(d_hidden, hidden_size);
+
+    matVecMulBias<<<numBlocksOutput, BLOCK_SIZE>>>(d_linear2_weights, d_hidden, d_linear2_bias, d_output, output_size, hidden_size);
+    softmax<<<1, BLOCK_SIZE>>>(d_output, output_size);
+
+    // Copy results back to host
+    cudaMemcpy(h_output, d_output, output_size * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Print output
+    for (int i = 0; i < output_size; ++i) {
+        std::cout << h_output[i] << " ";
+    }
+    std::cout << std::endl;
+
+    // Free host and device memory
+    delete[] h_input;
+    delete[] h_hidden;
+    delete[] h_output;
+    delete[] h_linear1_weights;
+    delete[] h_linear1_bias;
+    delete[] h_linear2_weights;
+    delete[] h_linear2_bias;
+
+    cudaFree(d_input);
+    cudaFree(d_hidden);
+    cudaFree(d_output);
+    cudaFree(d_linear1_weights);
+    cudaFree(d_linear1_bias);
+    cudaFree(d_linear2_weights);
