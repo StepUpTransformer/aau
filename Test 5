@@ -1,4 +1,192 @@
-Profiling Triton Language code involves analyzing the performance of your custom GPU kernels written in Triton to identify bottlenecks and optimize them. Below are steps to effectively profile Triton code:
+Profiling PyTorch code line-by-line involves analyzing how much time and memory each operation or code block consumes. This can help identify bottlenecks and optimize your code effectively. Below are methods for line-by-line profiling:
+
+
+---
+
+1. Use torch.profiler (Recommended)
+
+PyTorch provides a built-in profiler that can collect detailed information on operations, including execution time and memory usage. To analyze the code line-by-line:
+
+Example:
+
+import torch
+import torch.profiler
+
+# Example model and data
+model = torch.nn.Linear(1000, 1000).cuda()
+x = torch.randn(100, 1000).cuda()
+
+# Enable profiler
+with torch.profiler.profile(
+    activities=[
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA
+    ],
+    on_trace_ready=torch.profiler.tensorboard_trace_handler("./log"),  # Save results for TensorBoard
+    record_shapes=True,
+    with_stack=True
+) as prof:
+    # Code to profile
+    for _ in range(10):
+        y = model(x)
+
+# Print summary
+print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
+Key Features:
+
+activities: Tracks both CPU and GPU operations.
+
+on_trace_ready: Exports profiling data to be visualized in TensorBoard.
+
+record_shapes: Captures tensor shapes for better insights.
+
+with_stack: Provides stack traces to map operations to specific lines of code.
+
+
+To view detailed profiling results, launch TensorBoard:
+
+tensorboard --logdir=./log
+
+
+---
+
+2. Use torch.autograd.profiler
+
+If your code involves gradients, use torch.autograd.profiler for finer granularity, focusing on autograd operations.
+
+Example:
+
+import torch
+
+# Example model and data
+model = torch.nn.Linear(1000, 1000).cuda()
+x = torch.randn(100, 1000).cuda()
+
+# Enable profiler
+with torch.autograd.profiler.profile(enabled=True, use_cuda=True) as prof:
+    # Code to profile
+    y = model(x)
+
+# Print profiling results
+print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
+Key Features:
+
+Tracks GPU (use_cuda=True) and CPU time.
+
+Outputs detailed information on forward and backward passes.
+
+
+
+---
+
+3. Use Line Profiler with torch.profiler
+
+For true line-by-line profiling, pair PyTorch Profiler with tools like line_profiler.
+
+Steps:
+
+1. Install line_profiler:
+
+pip install line-profiler
+
+
+2. Add the @profile decorator to the function you want to profile.
+
+
+3. Run the profiler with kernprof:
+
+kernprof -l -v your_script.py
+
+
+
+Example:
+
+import torch
+
+@profile
+def model_execution():
+    model = torch.nn.Linear(1000, 1000).cuda()
+    x = torch.randn(100, 1000).cuda()
+    y = model(x)
+    return y
+
+if __name__ == "__main__":
+    model_execution()
+
+
+---
+
+4. Use NVIDIA Nsight Systems for GPU Profiling
+
+For line-level GPU profiling, NVIDIA Nsight Systems provides detailed execution timelines for GPU and CPU activities.
+
+Steps:
+
+1. Install Nsight Systems.
+
+
+2. Launch your script with Nsight:
+
+nsys profile python your_script.py
+
+
+3. Open the .nsys-rep file in Nsight Systems GUI to view the profiling timeline.
+
+
+
+
+---
+
+5. Use timeit for Quick Profiling
+
+For simple time measurements of specific lines or blocks, use Python’s timeit module.
+
+Example:
+
+import time
+
+# Example model and data
+model = torch.nn.Linear(1000, 1000).cuda()
+x = torch.randn(100, 1000).cuda()
+
+# Time specific operations
+start = time.time()
+y = model(x)
+end = time.time()
+
+print(f"Execution time: {end - start:.4f} seconds")
+
+
+---
+
+6. Combine Profiling with Memory Tracking
+
+To track memory usage line-by-line, use torch.cuda.memory_allocated() or torch.cuda.memory_reserved():
+
+Example:
+
+import torch
+
+model = torch.nn.Linear(1000, 1000).cuda()
+x = torch.randn(100, 1000).cuda()
+
+# Track memory before and after
+torch.cuda.reset_peak_memory_stats()
+y = model(x)
+print(f"Peak memory usage: {torch.cuda.max_memory_allocated() / 1e6:.2f} MB")
+
+
+---
+
+Comparison of Methods
+
+Choose the method based on the level of detail you need and whether you’re focusing on CPU or GPU operations.
+
+
+Profiling Triton Language code involves 
+ the performance of your custom GPU kernels written in Triton to identify bottlenecks and optimize them. Below are steps to effectively profile Triton code:
 
 
 ---
