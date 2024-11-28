@@ -150,3 +150,65 @@ void run_optimized_kernels(const float* mat, const float* vec, const float* bias
     cudaFree(d_bias);
     cudaFree(d_output);
 }
+
+
+#include <cmath>
+
+#define BLOCK_SIZE 256
+
+// CUDA Kernel for matrix-vector multiplication with bias
+__global__ void cuda_mm(const float* mat, const float* vec, float* output, const float* bias, int rows, int cols) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < rows) {
+        float sum = 0.0f;
+        for (int col = 0; col < cols; ++col) {
+            sum += mat[row * cols + col] * vec[col];
+        }
+        // Add bias
+        output[row] = sum + bias[row];
+    }
+}
+
+// CUDA Kernel for Tanh activation
+__global__ void cuda_Tanh_0(float* data, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < size) {
+        data[idx] = tanhf(data[idx]);
+    }
+}
+
+// Host code to invoke the kernels
+void run_cuda_kernels(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
+    // Define grid and block dimensions
+    dim3 blockDim(BLOCK_SIZE);
+    dim3 gridDim((rows + BLOCK_SIZE - 1) / BLOCK_SIZE);
+
+    // Allocate memory on the GPU
+    float *d_mat, *d_vec, *d_bias, *d_output;
+    cudaMalloc(&d_mat, rows * cols * sizeof(float));
+    cudaMalloc(&d_vec, cols * sizeof(float));
+    cudaMalloc(&d_bias, rows * sizeof(float));
+    cudaMalloc(&d_output, rows * sizeof(float));
+
+    // Copy data to GPU
+    cudaMemcpy(d_mat, mat, rows * cols * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_vec, vec, cols * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_bias, bias, rows * sizeof(float), cudaMemcpyHostToDevice);
+
+    // Launch matrix-vector multiplication kernel
+    cuda_mm<<<gridDim, blockDim>>>(d_mat, d_vec, d_output, d_bias, rows, cols);
+
+    // Launch Tanh activation kernel
+    cuda_Tanh_0<<<gridDim, blockDim>>>(d_output, rows);
+
+    // Copy result back to host
+    cudaMemcpy(output, d_output, rows * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Free GPU memory
+    cudaFree(d_mat);
+    cudaFree(d_vec);
+    cudaFree(d_bias);
+    cudaFree(d_output);
+}
