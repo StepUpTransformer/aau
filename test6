@@ -1,0 +1,74 @@
+#include <cmath>
+
+#define BLOCK_SIZE 256
+
+// CUDA Kernel for matrix-vector multiplication, bias addition, and Tanh activation
+__global__ void cuda_mm_tanh(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
+    // Shared memory for the vector
+    __shared__ float shared_vec[BLOCK_SIZE];
+
+    // Compute row index
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < rows) {
+        float sum = 0.0f;
+
+        // Matrix-vector multiplication
+        for (int tile = 0; tile < (cols + BLOCK_SIZE - 1) / BLOCK_SIZE; ++tile) {
+            // Load a tile of the vector into shared memory
+            int col = tile * BLOCK_SIZE + threadIdx.x;
+            if (col < cols) {
+                shared_vec[threadIdx.x] = vec[col];
+            } else {
+                shared_vec[threadIdx.x] = 0.0f;
+            }
+            __syncthreads();
+
+            // Multiply the row of the matrix with the shared vector tile
+            for (int i = 0; i < BLOCK_SIZE; ++i) {
+                int col_idx = tile * BLOCK_SIZE + i;
+                if (col_idx < cols) {
+                    sum += mat[row * cols + col_idx] * shared_vec[i];
+                }
+            }
+            __syncthreads();
+        }
+
+        // Add bias and apply Tanh activation
+        if (bias) {
+            sum += bias[row];
+        }
+        output[row] = tanhf(sum);
+    }
+}
+
+// Host code to invoke the optimized kernel
+void run_optimized_cuda_kernels(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
+    // Define grid and block dimensions
+    dim3 blockDim(BLOCK_SIZE);
+    dim3 gridDim((rows + BLOCK_SIZE - 1) / BLOCK_SIZE);
+
+    // Allocate memory on the GPU
+    float *d_mat, *d_vec, *d_bias, *d_output;
+    cudaMalloc(&d_mat, rows * cols * sizeof(float));
+    cudaMalloc(&d_vec, cols * sizeof(float));
+    cudaMalloc(&d_bias, rows * sizeof(float));
+    cudaMalloc(&d_output, rows * sizeof(float));
+
+    // Copy data to GPU
+    cudaMemcpy(d_mat, mat, rows * cols * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_vec, vec, cols * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_bias, bias, rows * sizeof(float), cudaMemcpyHostToDevice);
+
+    // Launch optimized kernel
+    cuda_mm_tanh<<<gridDim, blockDim>>>(d_mat, d_vec, d_bias, d_output, rows, cols);
+
+    // Copy result back to host
+    cudaMemcpy(output, d_output, rows * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Free GPU memory
+    cudaFree(d_mat);
+    cudaFree(d_vec);
+    cudaFree(d_bias);
+    cudaFree(d_output);
+}
