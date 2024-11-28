@@ -72,3 +72,81 @@ void run_optimized_cuda_kernels(const float* mat, const float* vec, const float*
     cudaFree(d_bias);
     cudaFree(d_output);
 }
+
+
+#include <cmath>
+
+#define BLOCK_SIZE 256
+
+// Optimized CUDA Kernel for matrix-vector multiplication with bias
+__global__ void cuda_mm(const float* __restrict__ mat, const float* __restrict__ vec, float* __restrict__ output, const float* __restrict__ bias, int rows, int cols) {
+    extern __shared__ float shared_vec[];  // Shared memory for vector
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+
+    float sum = 0.0f;
+
+    if (row < rows) {
+        for (int col = 0; col < cols; col += blockDim.x) {
+            // Load a chunk of the vector into shared memory
+            int vec_idx = col + threadIdx.x;
+            if (vec_idx < cols) {
+                shared_vec[threadIdx.x] = vec[vec_idx];
+            }
+            __syncthreads();
+
+            // Perform multiplication for the current chunk
+            for (int i = 0; i < blockDim.x && (col + i) < cols; ++i) {
+                sum += mat[row * cols + col + i] * shared_vec[i];
+            }
+            __syncthreads();
+        }
+        // Add bias and store the result
+        output[row] = sum + bias[row];
+    }
+}
+
+// Optimized CUDA Kernel for Tanh activation
+__global__ void cuda_Tanh_0(float* __restrict__ data, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < size) {
+        float val = data[idx];
+        data[idx] = tanhf(val);
+    }
+}
+
+// Host function to invoke the optimized kernels
+void run_optimized_kernels(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
+    // Define grid and block dimensions
+    dim3 blockDim(BLOCK_SIZE);
+    dim3 gridDim_mm((rows + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    dim3 gridDim_tanh((rows + BLOCK_SIZE - 1) / BLOCK_SIZE);
+
+    // Allocate memory on the GPU
+    float *d_mat, *d_vec, *d_bias, *d_output;
+    cudaMalloc(&d_mat, rows * cols * sizeof(float));
+    cudaMalloc(&d_vec, cols * sizeof(float));
+    cudaMalloc(&d_bias, rows * sizeof(float));
+    cudaMalloc(&d_output, rows * sizeof(float));
+
+    // Copy data to GPU
+    cudaMemcpy(d_mat, mat, rows * cols * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_vec, vec, cols * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_bias, bias, rows * sizeof(float), cudaMemcpyHostToDevice);
+
+    // Launch optimized matrix-vector multiplication kernel
+    size_t shared_memory_size = BLOCK_SIZE * sizeof(float);  // Shared memory size for the vector
+    cuda_mm<<<gridDim_mm, blockDim, shared_memory_size>>>(d_mat, d_vec, d_output, d_bias, rows, cols);
+
+    // Launch optimized Tanh activation kernel
+    cuda_Tanh_0<<<gridDim_tanh, blockDim>>>(d_output, rows);
+
+    // Copy result back to host
+    cudaMemcpy(output, d_output, rows * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Free GPU memory
+    cudaFree(d_mat);
+    cudaFree(d_vec);
+    cudaFree(d_bias);
+    cudaFree(d_output);
+}
