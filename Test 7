@@ -47,3 +47,53 @@ __global__ void softmax_optimized(float *output, float *softmax_out, int output_
         softmax_out[idx] = expf(output[idx] - max_val) / sum_exp;
     }
 }
+
+#include <cuda_runtime.h>
+#include <float.h>
+
+__global__ void softmax_ultra(float *output, float *softmax_out, int output_size) {
+    extern __shared__ float shared_data[]; // Shared memory for reduction
+
+    int tid = threadIdx.x;
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int block_size = blockDim.x;
+
+    // Step 1: Load the output values into shared memory and compute the maximum in parallel
+    float local_max = -FLT_MAX;
+    for (int i = tid; i < output_size; i += block_size) {
+        local_max = fmaxf(local_max, output[i]);
+    }
+
+    // Reduce max across the block using warp-level primitives
+    shared_data[tid] = local_max;
+    __syncthreads();
+    for (int stride = block_size / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            shared_data[tid] = fmaxf(shared_data[tid], shared_data[tid + stride]);
+        }
+        __syncthreads();
+    }
+    float max_val = shared_data[0];
+
+    // Step 2: Compute the sum of exponentials in parallel
+    float local_sum = 0.0f;
+    for (int i = tid; i < output_size; i += block_size) {
+        local_sum += expf(output[i] - max_val);
+    }
+
+    // Reduce sum across the block
+    shared_data[tid] = local_sum;
+    __syncthreads();
+    for (int stride = block_size / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            shared_data[tid] += shared_data[tid + stride];
+        }
+        __syncthreads();
+    }
+    float sum_exp = shared_data[0];
+
+    // Step 3: Write the normalized softmax output
+    for (int i = tid; i < output_size; i += block_size) {
+        softmax_out[i] = expf(output[i] - max_val) / sum_exp;
+    }
+}
