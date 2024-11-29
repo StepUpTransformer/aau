@@ -1,0 +1,49 @@
+__global__ void softmax_optimized(float *output, float *softmax_out, int output_size) {
+    extern __shared__ float shared_data[]; // Shared memory for temporary storage
+
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int tid = threadIdx.x;
+
+    if (idx >= output_size) return;
+
+    // Step 1: Find the maximum value in the output array (per block)
+    float max_val = -FLT_MAX;
+    for (int i = tid; i < output_size; i += blockDim.x) {
+        max_val = fmaxf(max_val, output[i]);
+    }
+
+    // Reduce max_val across the block
+    shared_data[tid] = max_val;
+    __syncthreads();
+
+    for (int offset = blockDim.x / 2; offset > 0; offset /= 2) {
+        if (tid < offset) {
+            shared_data[tid] = fmaxf(shared_data[tid], shared_data[tid + offset]);
+        }
+        __syncthreads();
+    }
+    max_val = shared_data[0]; // The maximum value in the block
+
+    // Step 2: Compute the sum of exponentials (per block)
+    float sum_exp = 0.0f;
+    for (int i = tid; i < output_size; i += blockDim.x) {
+        sum_exp += expf(output[i] - max_val);
+    }
+
+    // Reduce sum_exp across the block
+    shared_data[tid] = sum_exp;
+    __syncthreads();
+
+    for (int offset = blockDim.x / 2; offset > 0; offset /= 2) {
+        if (tid < offset) {
+            shared_data[tid] += shared_data[tid + offset];
+        }
+        __syncthreads();
+    }
+    sum_exp = shared_data[0]; // The sum of exponentials in the block
+
+    // Step 3: Compute the softmax output
+    if (idx < output_size) {
+        softmax_out[idx] = expf(output[idx] - max_val) / sum_exp;
+    }
+}
