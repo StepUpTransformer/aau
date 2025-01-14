@@ -4,8 +4,6 @@
 #include <cfloat>
 #include <sys/time.h>
 
-#define BLOCK_SIZE 256
-
 // CUDA Kernel for fused matrix-vector multiplication with bias and Tanh activation
 __global__ void fused_tanh_0_cuda(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
