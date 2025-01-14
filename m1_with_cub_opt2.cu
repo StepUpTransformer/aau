@@ -4,51 +4,42 @@
 #include <cfloat>
 #include <sys/time.h>
 
-#define BLOCK_SIZE 256 // Optimized block size for performance
+#define BLOCK_SIZE 256
 
 // CUDA Kernel for matrix-vector multiplication with bias
 __global__ void mm_cuda(const float* mat, const float* vec, float* output, int rows, int cols) {
-    __shared__ float shared_vec[BLOCK_SIZE];
+    int idx = blockIdx.x * blockDim.x * blockDim.y + threadIdx.y * blockDim.x + threadIdx.x;
 
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    float result = 0.0f;
-
-    for (int tile = 0; tile < (cols + BLOCK_SIZE - 1) / BLOCK_SIZE; ++tile) {
-        int col = tile * BLOCK_SIZE + threadIdx.x;
-        if (col < cols) {
-            shared_vec[threadIdx.x] = vec[col];
-        } else {
-            shared_vec[threadIdx.x] = 0.0f;
+    if (idx < rows) {
+        float mul = 0.0f;
+        for (int col = 0; col < cols; ++col) {
+            mul += mat[idx * cols + col] * vec[col];
         }
-        __syncthreads();
-
-        if (row < rows) {
-            for (int i = 0; i < BLOCK_SIZE; ++i) {
-                int idx = row * cols + tile * BLOCK_SIZE + i;
-                if (tile * BLOCK_SIZE + i < cols) {
-                    result += mat[idx] * shared_vec[i];
-                }
-            }
-        }
-        __syncthreads();
-    }
-
-    if (row < rows) {
-        output[row] = result;
+        output[idx] = mul;
     }
 }
 
 // CUDA Kernel for Tanh activation
 __global__ void Tanh_cuda(float* data, const float* bias, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        data[idx] = tanhf(data[idx] + bias[idx]);
+    __shared__ float shared_bias[BLOCK_SIZE]; // Shared memory for biases
+
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int stride = blockDim.x * gridDim.x;
+
+    if (threadIdx.x < size) {
+        shared_bias[threadIdx.x] = bias[threadIdx.x];
+    }
+    __syncthreads();
+
+    for (int i = idx; i < size; i += stride) {
+        data[i] = tanhf(data[i] + shared_bias[i % BLOCK_SIZE]);
     }
 }
 
 // CUDA Kernel for matrix-vector addition with bias
 __global__ void addmm_cuda(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
+
     if (row < rows) {
         float sum = bias[row];
         for (int col = 0; col < cols; ++col) {
@@ -58,38 +49,36 @@ __global__ void addmm_cuda(const float* mat, const float* vec, const float* bias
     }
 }
 
-// Optimized Softmax Kernel
+// CUDA Kernel for Softmax computation
 __global__ void softmax_1_cuda(float* output, float* softmax_out, int output_size) {
-    __shared__ float shared_max;
-    __shared__ float shared_sum;
+    __shared__ float max_val;
+    __shared__ float sum_exp;
 
-    int idx = threadIdx.x;
-    float local_max = -FLT_MAX;
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
-    // Compute max value in parallel
-    for (int i = idx; i < output_size; i += blockDim.x) {
-        local_max = fmaxf(local_max, output[i]);
+    if (threadIdx.x == 0) {
+        max_val = -FLT_MAX;
     }
-
-    // Reduce max value across threads
-    atomicMax((int*)&shared_max, __float_as_int(local_max));
     __syncthreads();
 
-    float max_val = shared_max;
-    float local_sum = 0.0f;
-
-    // Compute exponential sum in parallel
-    for (int i = idx; i < output_size; i += blockDim.x) {
-        local_sum += expf(output[i] - max_val);
+    // Find maximum value for numerical stability
+    if (idx < output_size) {
+        atomicMax(&max_val, output[idx]);
     }
-
-    // Reduce sum across threads
-    atomicAdd(&shared_sum, local_sum);
     __syncthreads();
 
-    // Compute softmax values
-    for (int i = idx; i < output_size; i += blockDim.x) {
-        softmax_out[i] = expf(output[i] - max_val) / shared_sum;
+    if (threadIdx.x == 0) {
+        sum_exp = 0.0f;
+    }
+    __syncthreads();
+
+    if (idx < output_size) {
+        atomicAdd(&sum_exp, expf(output[idx] - max_val));
+    }
+    __syncthreads();
+
+    if (idx < output_size) {
+        softmax_out[idx] = expf(output[idx] - max_val) / sum_exp;
     }
 }
 
@@ -118,7 +107,6 @@ int main() {
     const int input_size = 100;
     const int hidden_size = 200;
     const int output_size = 10;
-
     float *d_softmax_out;
 
     float *h_input = new float[input_size];
@@ -138,11 +126,12 @@ int main() {
     cudaMalloc(&d_input, input_size * sizeof(float));
     cudaMalloc(&d_hidden, hidden_size * sizeof(float));
     cudaMalloc(&d_output, output_size * sizeof(float));
+
     cudaMalloc(&d_linear1_weights, input_size * hidden_size * sizeof(float));
     cudaMalloc(&d_linear1_bias, hidden_size * sizeof(float));
     cudaMalloc(&d_linear2_weights, hidden_size * output_size * sizeof(float));
     cudaMalloc(&d_linear2_bias, output_size * sizeof(float));
-    cudaMalloc(&d_softmax_out, output_size * sizeof(float));
+    cudaMalloc((void**)&d_softmax_out, output_size * sizeof(float));
 
     cudaMemcpy(d_input, h_input, input_size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_linear1_weights, h_linear1_weights, input_size * hidden_size * sizeof(float), cudaMemcpyHostToDevice);
@@ -150,16 +139,21 @@ int main() {
     cudaMemcpy(d_linear2_weights, h_linear2_weights, hidden_size * output_size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_linear2_bias, h_linear2_bias, output_size * sizeof(float), cudaMemcpyHostToDevice);
 
-    dim3 gridDim_hidden((hidden_size + BLOCK_SIZE - 1) / BLOCK_SIZE);
-    dim3 blockDim_hidden(BLOCK_SIZE);
-    mm_cuda<<<gridDim_hidden, blockDim_hidden>>>(d_linear1_weights, d_input, d_hidden, hidden_size, input_size);
+    dim3 mm_gridDim(25, 1, 1);
+    dim3 mm_blockDim(8, 8, 1);
+    mm_cuda<<<mm_gridDim, mm_blockDim>>>(d_linear1_weights, d_input, d_hidden, hidden_size, input_size);
 
-    Tanh_cuda<<<gridDim_hidden, blockDim_hidden>>>(d_hidden, d_linear1_bias, hidden_size);
+    dim3 Tanh_gridDim(2, 1, 1);
+    dim3 Tanh_blockDim(128, 1, 1);
+    Tanh_cuda<<<Tanh_gridDim, Tanh_blockDim>>>(d_hidden, d_linear1_bias, hidden_size);
 
-    dim3 gridDim_output((output_size + BLOCK_SIZE - 1) / BLOCK_SIZE);
-    addmm_cuda<<<gridDim_output, blockDim_hidden>>>(d_linear2_weights, d_hidden, d_linear2_bias, d_output, output_size, hidden_size);
+    dim3 addmm_gridDim(2, 1, 1);
+    dim3 addmm_blockDim(16, 8, 1);
+    addmm_cuda<<<addmm_gridDim, addmm_blockDim>>>(d_linear2_weights, d_hidden, d_linear2_bias, d_output, output_size, hidden_size);
 
-    softmax_1_cuda<<<1, BLOCK_SIZE>>>(d_output, d_softmax_out, output_size);
+    dim3 softmax_gridDim(1, 1, 1);
+    dim3 softmax_blockDim(64, 1, 1);
+    softmax_1_cuda<<<softmax_gridDim, softmax_blockDim>>>(d_output, d_softmax_out, output_size);
 
     cudaMemcpy(h_output, d_softmax_out, output_size * sizeof(float), cudaMemcpyDeviceToHost);
 
@@ -184,7 +178,6 @@ int main() {
     cudaFree(d_linear1_bias);
     cudaFree(d_linear2_weights);
     cudaFree(d_linear2_bias);
-    cudaFree(d_softmax_out);
 
     return 0;
 }
