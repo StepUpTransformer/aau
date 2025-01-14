@@ -58,22 +58,17 @@ __global__ void softmax_1_cuda(float* output, float* softmax_out, int output_siz
 
     if (threadIdx.x == 0) {
         max_val = -FLT_MAX;
-    }
-    __syncthreads();
-
-    // Find maximum value for numerical stability
-    if (idx < output_size) {
-        atomicMax(&max_val, output[idx]);
+        for (int i = 0; i < output_size; ++i) {
+            max_val = fmaxf(max_val, output[i]);
+        }
     }
     __syncthreads();
 
     if (threadIdx.x == 0) {
         sum_exp = 0.0f;
-    }
-    __syncthreads();
-
-    if (idx < output_size) {
-        atomicAdd(&sum_exp, expf(output[idx] - max_val));
+        for (int i = 0; i < output_size; ++i) {
+            sum_exp += expf(output[i] - max_val);
+        }
     }
     __syncthreads();
 
