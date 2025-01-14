@@ -4,8 +4,6 @@
 #include <cfloat>
 #include <sys/time.h>
 
-#define BLOCK_SIZE 256 // Define a constant for the default block size
-
 // CUDA Kernel for matrix-vector multiplication with bias
 __global__ void mm_cuda(const float* mat, const float* vec, float* output, int rows, int cols) { 
     // Compute the thread's unique global index in the matrix
