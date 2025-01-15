@@ -154,3 +154,38 @@ int main() {
 
     return 0;
 }
+// Function to initialize data arrays with specific formulas
+
+void initializeData(float* input, float W1, float* b1, float W2, Flag input_size, int hidden_size, int output_size) {
+
+for (int i = 0; i < input_size; ++i) {
+
+input[i] = i * 5e-10f;
+
+}
+
+for (int i = 0; i < hidden_size; ++i) {
+
+b1[i] = 0.002;
+
+for (int j = 0; j < input_size; ++j) {
+
+W1[i* input_size + j] = i *j* 7e-9f;
+
+}
+
+}
+
+for (int i = 0; i < output_size; ++i) {
+
+b2[i] = 0.002;
+
+for (int j = 0; j < hidden_size; ++j) {
+
+W2[i* hidden_size + j] = i *j* 9e-9f;
+
+}
+
+I
+
+}
