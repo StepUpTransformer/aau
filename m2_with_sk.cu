@@ -6,48 +6,53 @@
 // CUDA Kernel for matrix-vector multiplication with bias
 // Grid size: (5000, 1, 1), Block size: (32, 4, 1)
 __global__ void mm_cuda(const float* mat, const float* vec, float* output, int rows, int cols) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    int col_offset = threadIdx.y;
+    int row = blockIdx.x * blockDim.x + threadIdx.x; // 1D row index
+    int col = threadIdx.y; // Shared within the block for partial computations
+
     if (row < rows) {
         float mul = 0.0f;
-        for (int col = col_offset; col < cols; col += blockDim.y) {
-            mul += mat[row * cols + col] * vec[col];
+        for (int i = 0; i < cols; ++i) {
+            mul += mat[row * cols + i] * vec[i];
         }
-        atomicAdd(&output[row], mul);
+        output[row] = mul;
     }
 }
 
 // CUDA Kernel for ReLU activation
 // Grid size: (79, 1, 1), Block size: (128, 1, 1)
 __global__ void ReLU_cuda(float* data, const float* bias, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x; // 1D global index
+
     if (idx < size) {
         float val = data[idx] + bias[idx];
-        data[idx] = val > 0.0f ? val : 0.0f;
+        data[idx] = val > 0.0f ? val : 0.0f; // Apply ReLU activation
     }
 }
 
 // CUDA Kernel for matrix-vector addition with bias
 // Grid size: (25, 1, 4), Block size: (34, 4, 1)
 __global__ void addmm_cuda(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    int col_offset = blockIdx.z * blockDim.y + threadIdx.y;
+    int row = blockIdx.x * blockDim.x + threadIdx.x; // 1D row index
+    int col = blockIdx.z; // Use 3D grid indexing for better accuracy
+
     if (row < rows) {
-        float sum = (threadIdx.y == 0) ? bias[row] : 0.0f;
-        for (int col = col_offset; col < cols; col += blockDim.y * gridDim.z) {
-            sum += mat[row * cols + col] * vec[col];
+        float sum = bias[row];
+        for (int i = 0; i < cols; ++i) {
+            sum += mat[row * cols + i] * vec[i];
         }
-        atomicAdd(&output[row], sum);
+        output[row] = sum;
     }
 }
 
-// Redesigned CUDA Kernel for Softmax computation
-// Computes all 100 values in Block size: (64, 1, 1) with __syncthreads()
+// CUDA Kernel for Softmax computation
+// Grid size: (1, 1, 1), Block size: (64, 1, 1)
 __global__ void softmax_1_cuda(float* output, float* softmax_out, int output_size) {
     __shared__ float max_val;
     __shared__ float sum_exp;
 
-    if (threadIdx.x == 0) {
+    int idx = threadIdx.x;
+
+    if (idx == 0) {
         max_val = output[0];
         for (int i = 1; i < output_size; ++i) {
             max_val = max(max_val, output[i]);
@@ -56,14 +61,14 @@ __global__ void softmax_1_cuda(float* output, float* softmax_out, int output_siz
     __syncthreads();
 
     float local_sum_exp = 0.0f;
-    for (int i = threadIdx.x; i < output_size; i += blockDim.x) {
-        local_sum_exp += expf(output[i] - max_val);
+    if (idx < output_size) {
+        local_sum_exp = expf(output[idx] - max_val);
     }
     atomicAdd(&sum_exp, local_sum_exp);
     __syncthreads();
 
-    if (threadIdx.x < output_size) {
-        softmax_out[threadIdx.x] = expf(output[threadIdx.x] - max_val) / sum_exp;
+    if (idx < output_size) {
+        softmax_out[idx] = expf(output[idx] - max_val) / sum_exp;
     }
 }
 
