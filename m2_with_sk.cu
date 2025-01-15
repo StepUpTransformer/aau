@@ -41,29 +41,46 @@ __global__ void addmm_cuda(const float* mat, const float* vec, const float* bias
     }
 }
 
-// CUDA Kernel for Softmax computation
-// Grid size: (1, 1, 1), Block size: (64, 1, 1)
+// Redesigned CUDA Kernel for Softmax computation
+// Computes all 100 values in Block size: (64, 1, 1) without __syncthreads()
 __global__ void softmax_1_cuda(float* output, float* softmax_out, int output_size) {
-    __shared__ float max_val;
-    __shared__ float sum_exp;
+    __shared__ float shared_data[64]; // Temporary storage for partial results
 
-    if (threadIdx.x == 0) {
-        max_val = output[0];
-        for (int i = 1; i < output_size; ++i) {
-            max_val = max(max_val, output[i]);
+    int tid = threadIdx.x;
+    float max_val = -INFINITY;
+    float sum_exp = 0.0f;
+
+    // Step 1: Compute the maximum value (each thread processes one element)
+    for (int i = tid; i < output_size; i += blockDim.x) {
+        max_val = fmaxf(max_val, output[i]);
+    }
+    shared_data[tid] = max_val;
+
+    // Step 2: Reduce to find the global max value
+    for (int stride = 32; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared_data[tid] = fmaxf(shared_data[tid], shared_data[tid + stride]);
         }
     }
-    __syncthreads();
+    max_val = shared_data[0];
 
-    float local_sum_exp = 0.0f;
-    for (int i = threadIdx.x; i < output_size; i += blockDim.x) {
-        local_sum_exp += expf(output[i] - max_val);
+    // Step 3: Compute the sum of exponentials
+    for (int i = tid; i < output_size; i += blockDim.x) {
+        sum_exp += expf(output[i] - max_val);
     }
-    atomicAdd(&sum_exp, local_sum_exp);
-    __syncthreads();
+    shared_data[tid] = sum_exp;
 
-    if (threadIdx.x < output_size) {
-        softmax_out[threadIdx.x] = expf(output[threadIdx.x] - max_val) / sum_exp;
+    // Step 4: Reduce to find the global sum of exponentials
+    for (int stride = 32; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared_data[tid] += shared_data[tid + stride];
+        }
+    }
+    sum_exp = shared_data[0];
+
+    // Step 5: Compute the softmax values
+    for (int i = tid; i < output_size; i += blockDim.x) {
+        softmax_out[i] = expf(output[i] - max_val) / sum_exp;
     }
 }
 
