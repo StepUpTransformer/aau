@@ -4,78 +4,65 @@
 #include <sys/time.h>
 
 // CUDA Kernel for matrix-vector multiplication with bias
-// Grid size: (5000, 1, 1), Block size: (32, 4, 1)
+// Grid size: (5000,1,1), Block size: (32,4,1)
 __global__ void mm_cuda(const float* mat, const float* vec, float* output, int rows, int cols) {
-    // Calculate 3D thread index
-    int idx = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * threadIdx.y;
-    // Calculate global index
-    int global_idx = idx + blockIdx.x * (blockDim.x * blockDim.y * blockDim.z);
-    if (global_idx < rows) {
+    // Calculate 2D thread index using block dimensions
+    int row = (blockIdx.x * blockDim.x * blockDim.y) + (threadIdx.y * blockDim.x) + threadIdx.x;
+    
+    if (row < rows) {
         float mul = 0.0f;
         for (int col = 0; col < cols; ++col) {
-            mul += mat[global_idx * cols + col] * vec[col];
+            mul += mat[row * cols + col] * vec[col];
         }
-        output[global_idx] = mul;
+        output[row] = mul;
     }
 }
 
 // CUDA Kernel for ReLU activation
-// Grid size: (79, 1, 1), Block size: (128, 1, 1)
+// Grid size: (79,1,1), Block size: (128,1,1)
 __global__ void ReLU_cuda(float* data, const float* bias, int size) {
-    // Calculate linear thread index
-    int idx = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blockDim.y;
-    // Calculate global index
-    int global_idx = idx + blockIdx.x * (blockDim.x * blockDim.y * blockDim.z);
-    if (global_idx < size) {
-        float val = data[global_idx] + bias[global_idx];
-        data[global_idx] = val > 0.0f ? val : 0.0f;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float val = data[idx] + bias[idx];
+        data[idx] = val > 0.0f ? val : 0.0f;
     }
 }
 
 // CUDA Kernel for matrix-vector addition with bias
-// Grid size: (25, 1, 4), Block size: (34, 4, 1)
+// Grid size: (25,1,4), Block size: (34,4,1)
 __global__ void addmm_cuda(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
     // Calculate 3D thread index
-    int idx = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * threadIdx.y;
-    // Calculate global index
-    int global_idx = idx + (blockIdx.x + blockIdx.z * gridDim.x) * (blockDim.x * blockDim.y * blockDim.z);
-    if (global_idx < rows) {
-        float sum = bias[global_idx];
+    int row = (blockIdx.x * blockDim.x * blockDim.y) + (threadIdx.y * blockDim.x) + threadIdx.x;
+    row += blockIdx.z * (gridDim.x * blockDim.x * blockDim.y);
+    
+    if (row < rows) {
+        float sum = bias[row];
         for (int col = 0; col < cols; ++col) {
-            sum += mat[global_idx * cols + col] * vec[col];
+            sum += mat[row * cols + col] * vec[col];
         }
-        output[global_idx] = sum;
+        output[row] = sum;
     }
 }
 
 // CUDA Kernel for Softmax computation
-// Grid size: (1, 1, 1), Block size: (64, 1, 1)
+// Grid size: (1,1,1), Block size: (64,1,1)
 __global__ void softmax_1_cuda(float* output, float* softmax_out, int output_size) {
-    // Since grid size is (1,1,1), all threads work on the same output
-    // Use shared memory for efficiency
-    __shared__ float s_output[64];
     int idx = threadIdx.x;
     if (idx < output_size) {
-        s_output[idx] = output[idx];
-    }
-    __syncthreads();
-
-    float max_val = -INFINITY;
-    for (int i = 0; i < output_size; ++i) {
-        if (s_output[i] > max_val) {
-            max_val = s_output[i];
+        // Find maximum value
+        float max_val = output[0];
+        for (int i = 1; i < output_size; ++i) {
+            max_val = max(max_val, output[i]);
         }
-    }
-    __syncthreads();
-
-    float sum_exp = 0.0f;
-    for (int i = 0; i < output_size; ++i) {
-        sum_exp += expf(s_output[i] - max_val);
-    }
-    __syncthreads();
-
-    if (idx < output_size) {
-        softmax_out[idx] = expf(s_output[idx] - max_val) / sum_exp;
+        
+        // Calculate sum of exponentials
+        float sum_exp = 0.0f;
+        for (int i = 0; i < output_size; ++i) {
+            sum_exp += expf(output[i] - max_val);
+        }
+        
+        // Calculate softmax
+        softmax_out[idx] = expf(output[idx] - max_val) / sum_exp;
     }
 }
 
@@ -103,8 +90,7 @@ int main() {
     const int hidden_size = 20000;
     const int output_size = 100;
 
-    float *d_softmax_out;
-
+    // Allocate host memory
     float *h_input = new float[input_size];
     float *h_hidden = new float[hidden_size];
     float *h_output = new float[output_size];
@@ -113,56 +99,58 @@ int main() {
     float *h_linear2_weights = new float[hidden_size * output_size];
     float *h_linear2_bias = new float[output_size];
 
-    initializeData(h_input, h_linear1_weights, h_linear1_bias, h_linear2_weights, h_linear2_bias, input_size, hidden_size, output_size);
+    initializeData(h_input, h_linear1_weights, h_linear1_bias, h_linear2_weights, h_linear2_bias, 
+                  input_size, hidden_size, output_size);
 
-    float *d_input, *d_hidden, *d_output;
+    // Allocate device memory
+    float *d_input, *d_hidden, *d_output, *d_softmax_out;
     float *d_linear1_weights, *d_linear1_bias;
     float *d_linear2_weights, *d_linear2_bias;
 
     cudaMalloc(&d_input, input_size * sizeof(float));
     cudaMalloc(&d_hidden, hidden_size * sizeof(float));
     cudaMalloc(&d_output, output_size * sizeof(float));
-
     cudaMalloc(&d_linear1_weights, input_size * hidden_size * sizeof(float));
     cudaMalloc(&d_linear1_bias, hidden_size * sizeof(float));
     cudaMalloc(&d_linear2_weights, hidden_size * output_size * sizeof(float));
     cudaMalloc(&d_linear2_bias, output_size * sizeof(float));
-    cudaMalloc((void**)&d_softmax_out, output_size * sizeof(float));
+    cudaMalloc(&d_softmax_out, output_size * sizeof(float));
 
+    // Copy data to device
     cudaMemcpy(d_input, h_input, input_size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_linear1_weights, h_linear1_weights, input_size * hidden_size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_linear1_bias, h_linear1_bias, hidden_size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_linear2_weights, h_linear2_weights, hidden_size * output_size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_linear2_bias, h_linear2_bias, output_size * sizeof(float), cudaMemcpyHostToDevice);
 
-    // Launch mm_cuda with specified grid and block dimensions
+    // Launch kernels with specified configurations
     dim3 mm_gridDim(5000, 1, 1);
     dim3 mm_blockDim(32, 4, 1);
     mm_cuda<<<mm_gridDim, mm_blockDim>>>(d_linear1_weights, d_input, d_hidden, hidden_size, input_size);
 
-    // Launch ReLU_cuda with specified grid and block dimensions
-    dim3 ReLU_gridDim(79, 1, 1);
-    dim3 ReLU_blockDim(128, 1, 1);
-    ReLU_cuda<<<ReLU_gridDim, ReLU_blockDim>>>(d_hidden, d_linear1_bias, hidden_size);
+    dim3 relu_gridDim(79, 1, 1);
+    dim3 relu_blockDim(128, 1, 1);
+    ReLU_cuda<<<relu_gridDim, relu_blockDim>>>(d_hidden, d_linear1_bias, hidden_size);
 
-    // Launch addmm_cuda with specified grid and block dimensions
     dim3 addmm_gridDim(25, 1, 4);
     dim3 addmm_blockDim(34, 4, 1);
     addmm_cuda<<<addmm_gridDim, addmm_blockDim>>>(d_linear2_weights, d_hidden, d_linear2_bias, d_output, output_size, hidden_size);
 
-    // Launch softmax_1_cuda with specified grid and block dimensions
     dim3 softmax_gridDim(1, 1, 1);
     dim3 softmax_blockDim(64, 1, 1);
     softmax_1_cuda<<<softmax_gridDim, softmax_blockDim>>>(d_output, d_softmax_out, output_size);
 
+    // Copy results back to host
     cudaMemcpy(h_output, d_softmax_out, output_size * sizeof(float), cudaMemcpyDeviceToHost);
 
+    // Print results
     std::cout << "\nOutput: " << std::endl;
     for (int i = 0; i < output_size; ++i) {
         std::cout << h_output[i] << " ";
     }
     std::cout << std::endl;
 
+    // Cleanup
     delete[] h_input;
     delete[] h_hidden;
     delete[] h_output;
@@ -178,6 +166,7 @@ int main() {
     cudaFree(d_linear1_bias);
     cudaFree(d_linear2_weights);
     cudaFree(d_linear2_bias);
+    cudaFree(d_softmax_out);
 
     return 0;
 }
