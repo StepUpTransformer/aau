@@ -6,69 +6,76 @@
 // CUDA Kernel for matrix-vector multiplication with bias
 // Grid size: (5000, 1, 1), Block size: (32, 4, 1)
 __global__ void mm_cuda(const float* mat, const float* vec, float* output, int rows, int cols) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x; // 1D row index
-    int col = threadIdx.y; // Shared within the block for partial computations
-
-    if (row < rows) {
+    // Calculate 3D thread index
+    int idx = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * threadIdx.y;
+    // Calculate global index
+    int global_idx = idx + blockIdx.x * (blockDim.x * blockDim.y * blockDim.z);
+    if (global_idx < rows) {
         float mul = 0.0f;
-        for (int i = 0; i < cols; ++i) {
-            mul += mat[row * cols + i] * vec[i];
+        for (int col = 0; col < cols; ++col) {
+            mul += mat[global_idx * cols + col] * vec[col];
         }
-        output[row] = mul;
+        output[global_idx] = mul;
     }
 }
 
 // CUDA Kernel for ReLU activation
 // Grid size: (79, 1, 1), Block size: (128, 1, 1)
 __global__ void ReLU_cuda(float* data, const float* bias, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x; // 1D global index
-
-    if (idx < size) {
-        float val = data[idx] + bias[idx];
-        data[idx] = val > 0.0f ? val : 0.0f; // Apply ReLU activation
+    // Calculate linear thread index
+    int idx = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blockDim.y;
+    // Calculate global index
+    int global_idx = idx + blockIdx.x * (blockDim.x * blockDim.y * blockDim.z);
+    if (global_idx < size) {
+        float val = data[global_idx] + bias[global_idx];
+        data[global_idx] = val > 0.0f ? val : 0.0f;
     }
 }
 
 // CUDA Kernel for matrix-vector addition with bias
 // Grid size: (25, 1, 4), Block size: (34, 4, 1)
 __global__ void addmm_cuda(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x; // 1D row index
-    int col = blockIdx.z; // Use 3D grid indexing for better accuracy
-
-    if (row < rows) {
-        float sum = bias[row];
-        for (int i = 0; i < cols; ++i) {
-            sum += mat[row * cols + i] * vec[i];
+    // Calculate 3D thread index
+    int idx = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * threadIdx.y;
+    // Calculate global index
+    int global_idx = idx + (blockIdx.x + blockIdx.z * gridDim.x) * (blockDim.x * blockDim.y * blockDim.z);
+    if (global_idx < rows) {
+        float sum = bias[global_idx];
+        for (int col = 0; col < cols; ++col) {
+            sum += mat[global_idx * cols + col] * vec[col];
         }
-        output[row] = sum;
+        output[global_idx] = sum;
     }
 }
 
 // CUDA Kernel for Softmax computation
 // Grid size: (1, 1, 1), Block size: (64, 1, 1)
 __global__ void softmax_1_cuda(float* output, float* softmax_out, int output_size) {
-    __shared__ float max_val;
-    __shared__ float sum_exp;
-
+    // Since grid size is (1,1,1), all threads work on the same output
+    // Use shared memory for efficiency
+    __shared__ float s_output[64];
     int idx = threadIdx.x;
+    if (idx < output_size) {
+        s_output[idx] = output[idx];
+    }
+    __syncthreads();
 
-    if (idx == 0) {
-        max_val = output[0];
-        for (int i = 1; i < output_size; ++i) {
-            max_val = max(max_val, output[i]);
+    float max_val = -INFINITY;
+    for (int i = 0; i < output_size; ++i) {
+        if (s_output[i] > max_val) {
+            max_val = s_output[i];
         }
     }
     __syncthreads();
 
-    float local_sum_exp = 0.0f;
-    if (idx < output_size) {
-        local_sum_exp = expf(output[idx] - max_val);
+    float sum_exp = 0.0f;
+    for (int i = 0; i < output_size; ++i) {
+        sum_exp += expf(s_output[i] - max_val);
     }
-    atomicAdd(&sum_exp, local_sum_exp);
     __syncthreads();
 
     if (idx < output_size) {
-        softmax_out[idx] = expf(output[idx] - max_val) / sum_exp;
+        softmax_out[idx] = expf(s_output[idx] - max_val) / sum_exp;
     }
 }
 
@@ -128,18 +135,22 @@ int main() {
     cudaMemcpy(d_linear2_weights, h_linear2_weights, hidden_size * output_size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_linear2_bias, h_linear2_bias, output_size * sizeof(float), cudaMemcpyHostToDevice);
 
+    // Launch mm_cuda with specified grid and block dimensions
     dim3 mm_gridDim(5000, 1, 1);
     dim3 mm_blockDim(32, 4, 1);
     mm_cuda<<<mm_gridDim, mm_blockDim>>>(d_linear1_weights, d_input, d_hidden, hidden_size, input_size);
 
+    // Launch ReLU_cuda with specified grid and block dimensions
     dim3 ReLU_gridDim(79, 1, 1);
     dim3 ReLU_blockDim(128, 1, 1);
     ReLU_cuda<<<ReLU_gridDim, ReLU_blockDim>>>(d_hidden, d_linear1_bias, hidden_size);
 
+    // Launch addmm_cuda with specified grid and block dimensions
     dim3 addmm_gridDim(25, 1, 4);
     dim3 addmm_blockDim(34, 4, 1);
     addmm_cuda<<<addmm_gridDim, addmm_blockDim>>>(d_linear2_weights, d_hidden, d_linear2_bias, d_output, output_size, hidden_size);
 
+    // Launch softmax_1_cuda with specified grid and block dimensions
     dim3 softmax_gridDim(1, 1, 1);
     dim3 softmax_blockDim(64, 1, 1);
     softmax_1_cuda<<<softmax_gridDim, softmax_blockDim>>>(d_output, d_softmax_out, output_size);
