@@ -1,13 +1,11 @@
 #include <cuda_runtime.h>
 #include <iostream>
 #include <cmath>
-#include <cfloat>
 #include <sys/time.h>
 
 // CUDA Kernel for matrix-vector multiplication with bias
 __global__ void mm_cuda(const float* mat, const float* vec, float* output, int rows, int cols) {
-    int idx = blockIdx.x * blockDim.x * blockDim.y + threadIdx.y * blockDim.x + threadIdx.x;
-
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < rows) {
         float mul = 0.0f;
         for (int col = 0; col < cols; ++col) {
@@ -17,18 +15,18 @@ __global__ void mm_cuda(const float* mat, const float* vec, float* output, int r
     }
 }
 
-__global__ void Tanh_cuda(float* data, const float* bias, int size) {
-    int idx = threadIdx.x;
-    int stride = blockDim.x;
-
-    for (int i = idx; i < size; i += stride) {
-        data[i] = tanhf(data[i] + bias[i]);
+// CUDA Kernel for ReLU activation
+__global__ void ReLU_cuda(float* data, const float* bias, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float val = data[idx] + bias[idx];
+        data[idx] = val > 0.0f ? val : 0.0f;
     }
 }
 
+// CUDA Kernel for matrix-vector addition with bias
 __global__ void addmm_cuda(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
-
     if (row < rows) {
         float sum = bias[row];
         for (int col = 0; col < cols; ++col) {
@@ -38,20 +36,18 @@ __global__ void addmm_cuda(const float* mat, const float* vec, const float* bias
     }
 }
 
+// CUDA Kernel for Softmax computation
 __global__ void softmax_1_cuda(float* output, float* softmax_out, int output_size) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
-
     if (idx < output_size) {
         float max_val = output[0];
         for (int i = 1; i < output_size; ++i) {
             max_val = max(max_val, output[i]);
         }
-
         float sum_exp = 0.0f;
         for (int i = 0; i < output_size; ++i) {
             sum_exp += expf(output[i] - max_val);
         }
-
         softmax_out[idx] = expf(output[idx] - max_val) / sum_exp;
     }
 }
@@ -79,6 +75,7 @@ int main() {
     const int input_size = 10000;
     const int hidden_size = 20000;
     const int output_size = 100;
+
     float *d_softmax_out;
 
     float *h_input = new float[input_size];
@@ -111,20 +108,20 @@ int main() {
     cudaMemcpy(d_linear2_weights, h_linear2_weights, hidden_size * output_size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_linear2_bias, h_linear2_bias, output_size * sizeof(float), cudaMemcpyHostToDevice);
 
-    dim3 mm_gridDim(25, 1, 1);
-    dim3 mm_blockDim(8, 8, 1);
+    dim3 mm_gridDim((hidden_size + 255) / 256);
+    dim3 mm_blockDim(256);
     mm_cuda<<<mm_gridDim, mm_blockDim>>>(d_linear1_weights, d_input, d_hidden, hidden_size, input_size);
 
-    dim3 Tanh_gridDim(1, 1, 1);
-    dim3 Tanh_blockDim(128, 1, 1);
-    Tanh_cuda<<<Tanh_gridDim, Tanh_blockDim>>>(d_hidden, d_linear1_bias, hidden_size);
+    dim3 ReLU_gridDim((hidden_size + 255) / 256);
+    dim3 ReLU_blockDim(256);
+    ReLU_cuda<<<ReLU_gridDim, ReLU_blockDim>>>(d_hidden, d_linear1_bias, hidden_size);
 
-    dim3 addmm_gridDim(2, 1, 1);
-    dim3 addmm_blockDim(16, 8, 1);
+    dim3 addmm_gridDim((output_size + 255) / 256);
+    dim3 addmm_blockDim(256);
     addmm_cuda<<<addmm_gridDim, addmm_blockDim>>>(d_linear2_weights, d_hidden, d_linear2_bias, d_output, output_size, hidden_size);
 
-    dim3 softmax_gridDim(1, 1, 1);
-    dim3 softmax_blockDim(64, 1, 1);
+    dim3 softmax_gridDim((output_size + 255) / 256);
+    dim3 softmax_blockDim(256);
     softmax_1_cuda<<<softmax_gridDim, softmax_blockDim>>>(d_output, d_softmax_out, output_size);
 
     cudaMemcpy(h_output, d_softmax_out, output_size * sizeof(float), cudaMemcpyDeviceToHost);
