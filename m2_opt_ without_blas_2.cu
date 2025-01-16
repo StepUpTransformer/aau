@@ -1,100 +1,74 @@
 #include <cuda_runtime.h>
 #include <iostream>
 #include <cmath>
+#include <cfloat>
 #include <sys/time.h>
 
-// CUDA Kernel for matrix-vector multiplication with bias
-// Grid size: (5000,1,1), Block size: (32,4,1)
-__global__ void mm_cuda(const float* __restrict__ mat, const float* __restrict__ vec, float* __restrict__ output, int rows, int cols) {
-    extern __shared__ float shared_vec[];
-    int row = (blockIdx.x * blockDim.x * blockDim.y) + (threadIdx.y * blockDim.x) + threadIdx.x;
-
-    if (threadIdx.x < cols) {
-        shared_vec[threadIdx.x] = vec[threadIdx.x];
-    }
-    __syncthreads();
-
+// CUDA Kernel for fused matrix-vector multiplication with bias and ReLU activation
+__global__ void fused_relu_0_cuda(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < rows) {
-        float mul = 0.0f;
+        float mul = bias[row];
         for (int col = 0; col < cols; ++col) {
-            mul += mat[row * cols + col] * shared_vec[col];
+            mul += mat[row * cols + col] * vec[col];
         }
-        output[row] = mul;
+        output[row] = mul > 0.0f ? mul : 0.0f; // Apply ReLU activation
     }
 }
 
-// CUDA Kernel for ReLU activation
-// Grid size: (79,1,1), Block size: (128,1,1)
-__global__ void ReLU_cuda(float* __restrict__ data, const float* __restrict__ bias, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        float val = data[idx] + bias[idx];
-        data[idx] = fmaxf(val, 0.0f);
-    }
-}
-
-// CUDA Kernel for matrix-vector addition with bias
-// Grid size: (25,1,4), Block size: (34,4,1)
-__global__ void addmm_cuda(const float* __restrict__ mat, const float* __restrict__ vec, const float* __restrict__ bias, float* __restrict__ output, int rows, int cols) {
-    extern __shared__ float shared_data[];
-    float* shared_vec = shared_data;
-    float* shared_bias = shared_vec + blockDim.x;
-
-    int tid = threadIdx.x;
-    if (tid < cols) {
-        shared_vec[tid] = vec[tid];
-    }
-    if (tid < rows) {
-        shared_bias[tid] = bias[tid];
-    }
-    __syncthreads();
-
-    int row = (blockIdx.x * blockDim.x * blockDim.y) + (threadIdx.y * blockDim.x) + threadIdx.x;
-    row += blockIdx.z * (gridDim.x * blockDim.x * blockDim.y);
-
+// CUDA Kernel for matrix-vector multiplication with bias
+__global__ void addmm_1_cuda(const float* mat, const float* vec, const float* bias, float* output, int rows, int cols) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < rows) {
-        float sum = shared_bias[row];
+        float sum = bias[row];
         for (int col = 0; col < cols; ++col) {
-            sum += mat[row * cols + col] * shared_vec[col];
+            sum += mat[row * cols + col] * vec[col];
         }
         output[row] = sum;
     }
 }
 
-// CUDA Kernel for Softmax computation
-// Grid size: (1,1,1), Block size: (64,1,1)
-__global__ void softmax_1_cuda(float* __restrict__ output, float* __restrict__ softmax_out, int output_size) {
-    int idx = threadIdx.x;
-
-    // Compute maximum using warp reduction
-    float max_val = -FLT_MAX;
-    if (idx < output_size) {
-        max_val = output[idx];
-    }
-    for (int offset = 32 / 2; offset > 0; offset /= 2) {
-        max_val = fmaxf(max_val, __shfl_down_sync(0xffffffff, max_val, offset));
-    }
-
+__global__ void softmax(float *input, float *output, int N) {
+    // Shared memory to store intermediate values for the block
     __shared__ float shared_max;
-    if (idx == 0) shared_max = max_val;
+    __shared__ float shared_sum;
+
+    // Calculate the thread ID
+    int tid = threadIdx.x;
+
+    // Step 1: Find the maximum value in the input for numerical stability
+    float local_max = -FLT_MAX;
+    for (int i = tid; i < N; i += blockDim.x) {
+        local_max = fmaxf(local_max, input[i]);
+    }
+
+    // Reduce local_max to shared_max using warp-level reduction
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        local_max = fmaxf(local_max, __shfl_down_sync(0xFFFFFFFF, local_max, s));
+    }
+    if (tid == 0) {
+        shared_max = local_max;
+    }
     __syncthreads();
 
-    // Compute sum of exponentials
-    float sum_exp = 0.0f;
-    if (idx < output_size) {
-        sum_exp = expf(output[idx] - shared_max);
-    }
-    for (int offset = 32 / 2; offset > 0; offset /= 2) {
-        sum_exp += __shfl_down_sync(0xffffffff, sum_exp, offset);
+    // Step 2: Compute the exponential values and their sum
+    float local_sum = 0.0f;
+    for (int i = tid; i < N; i += blockDim.x) {
+        local_sum += expf(input[i] - shared_max);
     }
 
-    __shared__ float shared_sum_exp;
-    if (idx == 0) shared_sum_exp = sum_exp;
+    // Reduce local_sum to shared_sum using warp-level reduction
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, s);
+    }
+    if (tid == 0) {
+        shared_sum = local_sum;
+    }
     __syncthreads();
 
-    // Compute softmax
-    if (idx < output_size) {
-        softmax_out[idx] = expf(output[idx] - shared_max) / shared_sum_exp;
+    // Step 3: Compute the softmax output
+    for (int i = tid; i < N; i += blockDim.x) {
+        output[i] = expf(input[i] - shared_max) / shared_sum;
     }
 }
 
@@ -122,22 +96,31 @@ int main() {
     const int hidden_size = 20000;
     const int output_size = 100;
 
-    // Allocate host memory
-    float *h_input = new float[input_size];
-    float *h_hidden = new float[hidden_size];
-    float *h_output = new float[output_size];
-    float *h_linear1_weights = new float[input_size * hidden_size];
-    float *h_linear1_bias = new float[hidden_size];
-    float *h_linear2_weights = new float[hidden_size * output_size];
-    float *h_linear2_bias = new float[output_size];
+    // Allocate host memory using pinned memory
+    float* h_input;
+    float* h_hidden;
+    float* h_output;
+    float* h_linear1_weights;
+    float* h_linear1_bias;
+    float* h_linear2_weights;
+    float* h_linear2_bias;
 
-    initializeData(h_input, h_linear1_weights, h_linear1_bias, h_linear2_weights, h_linear2_bias, 
-                  input_size, hidden_size, output_size);
+    cudaMallocHost(&h_input, input_size * sizeof(float));
+    cudaMallocHost(&h_hidden, hidden_size * sizeof(float));
+    cudaMallocHost(&h_output, output_size * sizeof(float));
+    cudaMallocHost(&h_linear1_weights, input_size * hidden_size * sizeof(float));
+    cudaMallocHost(&h_linear1_bias, hidden_size * sizeof(float));
+    cudaMallocHost(&h_linear2_weights, hidden_size * output_size * sizeof(float));
+    cudaMallocHost(&h_linear2_bias, output_size * sizeof(float));
+
+    // Initialize data
+    initializeData(h_input, h_linear1_weights, h_linear1_bias, h_linear2_weights, h_linear2_bias, input_size, hidden_size, output_size);
 
     // Allocate device memory
-    float *d_input, *d_hidden, *d_output, *d_softmax_out;
+    float *d_input, *d_hidden, *d_output;
     float *d_linear1_weights, *d_linear1_bias;
     float *d_linear2_weights, *d_linear2_bias;
+    float *d_softmax_out;
 
     cudaMalloc(&d_input, input_size * sizeof(float));
     cudaMalloc(&d_hidden, hidden_size * sizeof(float));
@@ -148,48 +131,57 @@ int main() {
     cudaMalloc(&d_linear2_bias, output_size * sizeof(float));
     cudaMalloc(&d_softmax_out, output_size * sizeof(float));
 
-    // Copy data to device
-    cudaMemcpy(d_input, h_input, input_size * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_linear1_weights, h_linear1_weights, input_size * hidden_size * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_linear1_bias, h_linear1_bias, hidden_size * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_linear2_weights, h_linear2_weights, hidden_size * output_size * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_linear2_bias, h_linear2_bias, output_size * sizeof(float), cudaMemcpyHostToDevice);
+    // Create CUDA streams
+    cudaStream_t stream1, stream2, stream3;
+    cudaStreamCreate(&stream1);
+    cudaStreamCreate(&stream2);
+    cudaStreamCreate(&stream3);
 
-    // Launch kernels with specified configurations
-    dim3 mm_gridDim(5000, 1, 1);
-    dim3 mm_blockDim(32, 4, 1);
-    mm_cuda<<<mm_gridDim, mm_blockDim, input_size * sizeof(float)>>>(d_linear1_weights, d_input, d_hidden, hidden_size, input_size);
+    // Copy data to device in streams
+    cudaMemcpyAsync(d_input, h_input, input_size * sizeof(float), cudaMemcpyHostToDevice, stream1);
+    cudaMemcpyAsync(d_linear1_weights, h_linear1_weights, input_size * hidden_size * sizeof(float), cudaMemcpyHostToDevice, stream1);
+    cudaMemcpyAsync(d_linear1_bias, h_linear1_bias, hidden_size * sizeof(float), cudaMemcpyHostToDevice, stream1);
+    cudaMemcpyAsync(d_linear2_weights, h_linear2_weights, hidden_size * output_size * sizeof(float), cudaMemcpyHostToDevice, stream2);
+    cudaMemcpyAsync(d_linear2_bias, h_linear2_bias, output_size * sizeof(float), cudaMemcpyHostToDevice, stream2);
 
-    dim3 relu_gridDim(79, 1, 1);
-    dim3 relu_blockDim(128, 1, 1);
-    ReLU_cuda<<<relu_gridDim, relu_blockDim>>>(d_hidden, d_linear1_bias, hidden_size);
+    // Launch fused_relu_0_cuda kernel with grid size (313,1,1) and block size (128,1,1) in stream1
+    dim3 fused_relu_gridDim(313, 1, 1);
+    dim3 fused_relu_blockDim(128, 1, 1);
+    fused_relu_0_cuda<<<fused_relu_gridDim, fused_relu_blockDim, 0, stream1>>>(d_linear1_weights, d_input, d_linear1_bias, d_hidden, hidden_size, input_size);
 
-    dim3 addmm_gridDim(25, 1, 4);
-    dim3 addmm_blockDim(34, 4, 1);
-    addmm_cuda<<<addmm_gridDim, addmm_blockDim, (input_size + hidden_size) * sizeof(float)>>>(d_linear2_weights, d_hidden, d_linear2_bias, d_output, output_size, hidden_size);
+    // Launch addmm_1_cuda kernel with grid size (4,1,1) and block size (64,1,1) in stream2
+    dim3 addmm_gridDim(4, 1, 1);
+    dim3 addmm_blockDim(64, 1, 1);
+    addmm_1_cuda<<<addmm_gridDim, addmm_blockDim, 0, stream2>>>(d_linear2_weights, d_hidden, d_linear2_bias, d_output, output_size, hidden_size);
 
+    // Launch softmax kernel with grid size (1,1,1) and block size (64,1,1) in stream3
     dim3 softmax_gridDim(1, 1, 1);
     dim3 softmax_blockDim(64, 1, 1);
-    softmax_1_cuda<<<softmax_gridDim, softmax_blockDim>>>(d_output, d_softmax_out, output_size);
+    softmax<<<softmax_gridDim, softmax_blockDim, 0, stream3>>>(d_output, d_softmax_out, output_size);
 
-    // Copy results back to host
+    // Wait for all streams to finish
+    cudaStreamSynchronize(stream1);
+    cudaStreamSynchronize(stream2);
+    cudaStreamSynchronize(stream3);
+
+    // Copy results back to host in default stream
     cudaMemcpy(h_output, d_softmax_out, output_size * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // Print results
+    // Output the results
     std::cout << "\nOutput: " << std::endl;
     for (int i = 0; i < output_size; ++i) {
         std::cout << h_output[i] << " ";
     }
     std::cout << std::endl;
 
-    // Cleanup
-    delete[] h_input;
-    delete[] h_hidden;
-    delete[] h_output;
-    delete[] h_linear1_weights;
-    delete[] h_linear1_bias;
-    delete[] h_linear2_weights;
-    delete[] h_linear2_bias;
+    // Clean up
+    cudaFreeHost(h_input);
+    cudaFreeHost(h_hidden);
+    cudaFreeHost(h_output);
+    cudaFreeHost(h_linear1_weights);
+    cudaFreeHost(h_linear1_bias);
+    cudaFreeHost(h_linear2_weights);
+    cudaFreeHost(h_linear2_bias);
 
     cudaFree(d_input);
     cudaFree(d_hidden);
@@ -199,6 +191,10 @@ int main() {
     cudaFree(d_linear2_weights);
     cudaFree(d_linear2_bias);
     cudaFree(d_softmax_out);
+
+    cudaStreamDestroy(stream1);
+    cudaStreamDestroy(stream2);
+    cudaStreamDestroy(stream3);
 
     return 0;
 }
